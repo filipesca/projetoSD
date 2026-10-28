@@ -16,6 +16,7 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 
 /*
     Downloader (web crawler).
@@ -100,8 +101,9 @@ public class Downloader implements DownloaderInterface {
                 System.out.println("Indexed: " + url + " | title: \"" + page.getTitle() + "\" | "
                         + page.getWords().size() + " words | " + page.getLinks().size() + " links");
 
-                // Devolve os links encontrados à fila para indexação iterativa
-                queue.addUrls(new ArrayList<>(page.getLinks()));
+                // Devolve os links encontrados à fila para indexação iterativa (se a fila estiver em
+                // baixo, espera por ela: a página já foi indexada, só faltam os links)
+                sendLinks(url, new ArrayList<>(page.getLinks()));
 
             } catch (Exception e) {
                 System.out.println("Failed to process URL: " + url + " (" + e + ")");
@@ -116,6 +118,28 @@ public class Downloader implements DownloaderInterface {
                 notifyReady();
             }
         }).start();
+    }
+
+    // Envia à fila os links encontrados numa página. Se a fila não responder, volta a ligar-se a ela
+    // (espera que reinicie) e repete o envio dos mesmos links até conseguir: a página já foi enviada
+    // aos Barrels, por isso o URL não falhou e os links não se podem perder. Repetir é seguro porque
+    // a fila ignora URLs que já viu.
+    public void sendLinks(String url, List<String> links) {
+        while (!Thread.currentThread().isInterrupted()) {
+            URLQueueInterface q = queue;
+            try {
+                if (q == null) {
+                    reconnect();
+                    continue;
+                }
+                q.addUrls(links);
+                return;
+            } catch (RemoteException e) {
+                System.out.println("URL queue unreachable: " + reason(e) + " (keeping the " + links.size()
+                        + " links of " + url + " until it is back)");
+                reconnect();
+            }
+        }
     }
 
     // Descarrega a página e extrai a informação para o índice
@@ -185,6 +209,7 @@ public class Downloader implements DownloaderInterface {
                 try {
                     Thread.sleep(reconnectMs);
                 } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt(); // quem chamou vê a interrupção e termina
                     return;
                 }
             }

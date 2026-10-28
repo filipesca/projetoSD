@@ -8,7 +8,15 @@ import common.Tokenizer;
 import common.UrlNormalizer;
 import queue.URLQueueInterface;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -37,6 +45,10 @@ import java.util.concurrent.ThreadLocalRandom;
     - Indexação: envia os URLs dos utilizadores para o início da fila; se a fila estiver em baixo,
       guarda-os e reenvia-os quando ela voltar (os pedidos de indexação não se perdem).
     - Estatísticas: enviadas aos clientes subscritos por callback, só quando mudam.
+    - Recuperação de avarias: os URLs pendentes e o número de vezes que cada pesquisa foi feita são
+      gravados num ficheiro de objetos (gateway.data.file) e carregados ao arrancar. Os URLs pendentes
+      são gravados logo em cada alteração; as contagens periodicamente. Os tempos de resposta dos
+      Barrels não são gravados (decisão do grupo): são medições e voltam a ser medidos.
     A Gateway cria o seu próprio RMI registry, para não depender do processo da fila.
 */
 
@@ -124,18 +136,54 @@ public class Gateway implements GatewayInterface {
     private final BlockingDeque<String> pendingUrls = new LinkedBlockingDeque<>();
     private final long queueRetryMs;
 
+    // Intervalo entre verificações da lista de URLs pendentes quando está vazia (milissegundos)
+    private static final long PENDING_POLL_MS = 100;
+
     // Tempo sem heartbeat até um Barrel ser retirado da lista
     private final long barrelTimeoutMs;
 
+    // Estado gravado em ficheiro (null = sem persistência, usado nos testes) e intervalo de gravação
+    private final Path dataFile;
+    private final long saveIntervalMs;
+
+    // true quando as contagens de pesquisas mudaram e ainda não foram gravadas
+    private volatile boolean countsDirty = false;
+
+    // Estado da Gateway gravado em ficheiro (só o que não pode ser recalculado)
+    private static class GatewayState implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        final HashMap<String, Integer> searchCounts;
+        final ArrayList<String> pendingUrls;
+
+        GatewayState(HashMap<String, Integer> searchCounts, ArrayList<String> pendingUrls) {
+            this.searchCounts = searchCounts;
+            this.pendingUrls = pendingUrls;
+        }
+    }
+
+    // Gateway sem persistência (testes)
     public Gateway(long barrelTimeoutMs, String queueHost, int queuePort, String queueName, long queueRetryMs) {
+        this(barrelTimeoutMs, queueHost, queuePort, queueName, queueRetryMs, null, 0);
+    }
+
+    // Carrega o estado gravado (se existir) para recuperar de um crash
+    public Gateway(long barrelTimeoutMs, String queueHost, int queuePort, String queueName, long queueRetryMs,
+                   Path dataFile, long saveIntervalMs) {
         this.barrelTimeoutMs = barrelTimeoutMs;
         this.queueHost = queueHost;
         this.queuePort = queuePort;
         this.queueName = queueName;
         this.queueRetryMs = queueRetryMs;
+        this.dataFile = dataFile;
+        this.saveIntervalMs = saveIntervalMs;
+        if (dataFile != null) {
+            load();
+        }
     }
 
-    // Inicia as threads internas: expiração dos registos dos Barrels e reenvio dos URLs pendentes
+    // Inicia as threads internas: expiração dos registos dos Barrels, reenvio dos URLs pendentes e
+    // gravação periódica das contagens de pesquisas
     public void start() {
         Thread expiry = new Thread(this::expiryLoop, "barrel-expiry");
         expiry.setDaemon(true);
@@ -143,6 +191,67 @@ public class Gateway implements GatewayInterface {
         Thread pending = new Thread(this::pendingUrlsLoop, "pending-urls");
         pending.setDaemon(true);
         pending.start();
+        if (dataFile != null) {
+            Thread saver = new Thread(this::saveLoop, "gateway-saver");
+            saver.setDaemon(true);
+            saver.start();
+        }
+    }
+
+    // ------------------------------------------------------------------ Persistência
+
+    // Grava o estado: escreve num ficheiro temporário e substitui o anterior (um crash a meio da
+    // escrita nunca corrompe o ficheiro). synchronized: gravações de threads diferentes não se misturam.
+    public synchronized void save() {
+        if (dataFile == null) {
+            return;
+        }
+        countsDirty = false;
+        GatewayState state = new GatewayState(new HashMap<>(searchCounts), new ArrayList<>(pendingUrls));
+        Path tmp = dataFile.resolveSibling(dataFile.getFileName() + ".tmp");
+        try {
+            if (dataFile.getParent() != null) {
+                Files.createDirectories(dataFile.getParent());
+            }
+            try (ObjectOutputStream out = new ObjectOutputStream(Files.newOutputStream(tmp))) {
+                out.writeObject(state);
+            }
+            Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            countsDirty = true; // tenta de novo na próxima gravação periódica
+            System.out.println("Could not save Gateway state: " + e.getMessage());
+        }
+    }
+
+    // Lê o estado gravado; se não existir ou estiver corrompido, começa vazio
+    private void load() {
+        if (!Files.exists(dataFile)) {
+            System.out.println("No saved Gateway state found, starting empty: " + dataFile);
+            return;
+        }
+        try (ObjectInputStream in = new ObjectInputStream(Files.newInputStream(dataFile))) {
+            GatewayState state = (GatewayState) in.readObject();
+            searchCounts.putAll(state.searchCounts);
+            pendingUrls.addAll(state.pendingUrls);
+            System.out.println("Gateway state loaded from " + dataFile + ": " + state.pendingUrls.size()
+                    + " pending URLs, " + state.searchCounts.size() + " distinct searches.");
+        } catch (IOException | ClassNotFoundException | ClassCastException e) {
+            System.out.println("Saved Gateway state is unreadable, starting empty: " + dataFile + " (" + e + ")");
+        }
+    }
+
+    // Grava as contagens de pesquisas periodicamente, se tiverem mudado
+    private void saveLoop() {
+        while (true) {
+            try {
+                Thread.sleep(saveIntervalMs);
+            } catch (InterruptedException e) {
+                return;
+            }
+            if (countsDirty) {
+                save();
+            }
+        }
     }
 
     // ------------------------------------------------------------------ Barrels
@@ -288,6 +397,7 @@ public class Gateway implements GatewayInterface {
         String key = String.join(" ", new TreeSet<>(Tokenizer.words(query)));
         if (page == 0 && !key.isEmpty()) {
             searchCounts.merge(key, 1, Integer::sum);
+            countsDirty = true;
             statsChanged();
         }
         return results;
@@ -312,14 +422,16 @@ public class Gateway implements GatewayInterface {
         // Se já há URLs à espera, este fica atrás deles (mantém a ordem dos pedidos)
         if (!pendingUrls.isEmpty()) {
             pendingUrls.add(normalized);
+            save(); // gravado antes de responder: um crash da Gateway não perde o pedido
             return IndexResult.PENDING;
         }
         try {
             return queue().addUrlPriority(normalized) ? IndexResult.QUEUED : IndexResult.ALREADY_KNOWN;
         } catch (Exception e) {
-            // Fila em baixo: o pedido não se perde, é reenviado pela thread de retry
+            // Fila em baixo: o pedido não se perde, é gravado e reenviado pela thread de retry
             queue = null;
             pendingUrls.add(normalized);
+            save();
             System.out.println("URL queue unavailable: " + normalized + " kept for retry.");
             return IndexResult.PENDING;
         }
@@ -335,26 +447,30 @@ public class Gateway implements GatewayInterface {
         return q;
     }
 
-    // Thread que reenvia à fila os URLs pendentes, por ordem, até a fila os aceitar
+    // Thread que reenvia à fila os URLs pendentes, por ordem, até a fila os aceitar.
+    // O URL só sai da lista DEPOIS de a fila o aceitar: até lá continua a ser gravado no ficheiro,
+    // por isso um crash da Gateway a meio do envio não o perde (no pior caso é reenviado, e a fila
+    // ignora URLs repetidos).
     private void pendingUrlsLoop() {
         while (true) {
-            String url;
-            try {
-                url = pendingUrls.takeFirst();
-            } catch (InterruptedException e) {
-                return;
+            String url = pendingUrls.peekFirst();
+            long waitMs = PENDING_POLL_MS; // sem URLs pendentes: verifica de novo daqui a pouco
+            if (url != null) {
+                try {
+                    queue().addUrlPriority(url);
+                    pendingUrls.removeFirstOccurrence(url);
+                    save(); // já não está pendente
+                    System.out.println("Pending URL sent to the queue: " + url);
+                    continue;
+                } catch (Exception e) {
+                    queue = null;
+                    waitMs = queueRetryMs; // fila ainda em baixo
+                }
             }
             try {
-                queue().addUrlPriority(url);
-                System.out.println("Pending URL sent to the queue: " + url);
-            } catch (Exception e) {
-                queue = null;
-                pendingUrls.addFirst(url);
-                try {
-                    Thread.sleep(queueRetryMs);
-                } catch (InterruptedException ie) {
-                    return;
-                }
+                Thread.sleep(waitMs);
+            } catch (InterruptedException ie) {
+                return;
             }
         }
     }
@@ -440,14 +556,19 @@ public class Gateway implements GatewayInterface {
             port = config.getInt("gateway.port");
 
             // Cria a Gateway e exporta-a como objeto remoto
+            // Carrega o estado gravado (URLs pendentes e contagens de pesquisas) para recuperar de um crash
             Gateway gateway = new Gateway(config.getInt("gateway.barrel.timeout.ms"), config.getRmiHost(),
-                    config.getRmiPort(), config.get("queue.name"), config.getInt("gateway.queue.retry.ms"));
+                    config.getRmiPort(), config.get("queue.name"), config.getInt("gateway.queue.retry.ms"),
+                    Paths.get(config.get("gateway.data.file")), config.getInt("gateway.save.interval.ms"));
             GatewayInterface stub = (GatewayInterface) UnicastRemoteObject.exportObject(gateway, 0);
 
             // Registry próprio da Gateway (independente do registry da fila)
             Registry registry = LocateRegistry.createRegistry(port);
             registry.rebind(config.get("gateway.name"), stub);
 
+            // Ao terminar normalmente (ex.: Ctrl+C) grava o que ainda faltar. Só depois de o registry
+            // arrancar: uma segunda Gateway que falha no porto não substitui o ficheiro da primeira.
+            Runtime.getRuntime().addShutdownHook(new Thread(gateway::save));
             gateway.start();
             System.out.println("Gateway RMI Server ready.");
 
