@@ -74,7 +74,12 @@ public class Downloader implements DownloaderInterface {
     private PageData parsePage(String url) throws Exception {
         // Liga-se ao URL e obtém o documento HTML
         Document doc = Jsoup.connect(url).get();
+        return extract(url, doc);
+    }
 
+    // Extrai título, citação, palavras e links de um documento HTML já descarregado
+    // (separado do download para poder ser testado sem acesso à internet)
+    public static PageData extract(String url, Document doc) {
         String title = doc.title();
         String text = doc.body() != null ? doc.body().text() : "";
 
