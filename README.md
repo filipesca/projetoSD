@@ -14,7 +14,7 @@ uma Gateway RMI serve de única porta de entrada para os clientes.
 | `downloader.Downloader`: crawler (jsoup) | ✅ |
 | `barrel.Barrel`: índice invertido persistente | ✅ |
 | Reliable multicast Downloader → Barrels | ✅ |
-| `gateway.Gateway` | 🟡 registo dos Barrels (pesquisa e estatísticas: próximo passo) |
+| `gateway.Gateway`: pesquisa, backlinks, indexação, estatísticas, balanceamento e failover | ✅ |
 | `client.Client` | ⏳ |
 
 ## Requisitos
@@ -27,11 +27,11 @@ uma Gateway RMI serve de única porta de entrada para os clientes.
 ```
 googol.properties        configuração (lida em tempo de execução, sem recompilar)
 lib/jsoup-1.23.2.jar     biblioteca de parsing HTML
-src/common/              classes partilhadas (Config, PageData, IndexMessage, SearchResult, Tokenizer, UrlNormalizer)
+src/common/              classes partilhadas (Config, PageData, IndexMessage, SearchResult, Stats, Tokenizer, UrlNormalizer)
 src/queue/               URLQueue + interface remota
 src/downloader/          Downloader + interface remota (callback) + ReliableMulticast
 src/barrel/              Barrel + interface remota
-src/gateway/             Gateway + interface remota
+src/gateway/             Gateway + interface remota + StatsListener (callback das estatísticas)
 ```
 
 ## Compilar
@@ -94,6 +94,7 @@ linha `Error: ...`.
 | `queue.max.retries` | Novas tentativas para um URL cujo download falhou |
 | `gateway.host`, `gateway.port`, `gateway.name` | Máquina, porto do registry e nome da Gateway |
 | `gateway.barrel.timeout.ms` | Tempo sem heartbeat até a Gateway retirar um Barrel da lista |
+| `gateway.queue.retry.ms` | Intervalo entre tentativas de reenviar à fila os URLs pedidos enquanto ela estava em baixo |
 | `downloader.delay.ms` | Pausa entre páginas de cada Downloader |
 | `downloader.reconnect.ms` | Intervalo entre verificações da fila e da lista de Barrels, e entre tentativas de nova ligação |
 | `multicast.retry.ms` | Intervalo entre retransmissões a um Barrel que não respondeu |

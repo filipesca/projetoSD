@@ -232,7 +232,8 @@ public class Barrel implements BarrelInterface {
                 if (gateway == null) {
                     gateway = (GatewayInterface) LocateRegistry.getRegistry(host, port).lookup(gatewayName);
                 }
-                gateway.registerBarrel(name, self);
+                // O heartbeat leva o tamanho atual do índice (para as estatísticas da Gateway)
+                gateway.registerBarrel(name, self, getPageCount(), getWordCount());
                 if (!connected) {
                     System.out.println("Registered in Gateway at " + host + ":" + port + ".");
                     connected = true;
