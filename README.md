@@ -68,6 +68,11 @@ separador do classpath é `:` em vez de `;` (ex.: `-cp "out:lib/jsoup-1.23.2.jar
 Todos os programas aceitam, como último argumento, o caminho de outro ficheiro de configuração
 (por omissão usam `googol.properties` da pasta atual). Para terminar: `Ctrl+C`.
 
+Os Downloaders podem arrancar antes da fila: esperam por ela ("URLQueue not available ...,
+retrying"). Se a fila for reiniciada, os Downloaders detetam a falha e voltam a ligar-se sozinhos.
+Erros de configuração (ficheiro inexistente, valor inválido, porto ocupado) aparecem como uma
+linha `Error: ...`.
+
 ## Configuração (`googol.properties`)
 
 | Chave | Significado |
@@ -78,6 +83,7 @@ Todos os programas aceitam, como último argumento, o caminho de outro ficheiro 
 | `queue.seeds` | URLs iniciais, separados por vírgulas |
 | `queue.max.retries` | Novas tentativas para um URL cujo download falhou |
 | `downloader.delay.ms` | Pausa entre páginas de cada Downloader |
+| `downloader.reconnect.ms` | Intervalo entre verificações da fila e entre tentativas de nova ligação |
 | `barrel.data.dir` | Pasta onde os Barrels guardam o índice |
 | `barrel.save.interval.ms` | Intervalo entre gravações do índice em disco |
 

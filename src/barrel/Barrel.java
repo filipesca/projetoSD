@@ -10,6 +10,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -198,14 +199,16 @@ public class Barrel implements BarrelInterface {
             System.out.println("Usage: java barrel.Barrel <name> [config.properties]");
             return;
         }
+        Path dataDir = null;
         try {
             // O nome vem nos argumentos para várias máquinas poderem usar o mesmo ficheiro de configuração
             String name = args[0];
-            Config config = new Config(args.length > 1 ? args[1] : Config.DEFAULT_FILE);
+            Config config = Config.load(args.length > 1 ? args[1] : Config.DEFAULT_FILE);
             config.applyLocalHostname();
 
             // Carrega o índice guardado (recuperação depois de um crash) e ativa a gravação periódica
-            Barrel barrel = new Barrel(name, Paths.get(config.get("barrel.data.dir")));
+            dataDir = Paths.get(config.get("barrel.data.dir"));
+            Barrel barrel = new Barrel(name, dataDir);
             barrel.startAutoSave(config.getInt("barrel.save.interval.ms"));
 
             // Ao terminar normalmente (ex.: Ctrl+C) grava o que ainda faltar
@@ -216,8 +219,16 @@ public class Barrel implements BarrelInterface {
 
             System.out.println("Barrel " + name + " ready: " + barrel.getPageCount() + " pages, "
                     + barrel.getWordCount() + " words.");
+
+            // Erros previsíveis: mensagem clara em vez de stack trace
+        } catch (NoSuchFileException e) {
+            Config.exitWithError("configuration file not found: " + e.getFile());
+        } catch (IllegalArgumentException e) {
+            Config.exitWithError("invalid configuration: " + e.getMessage());
+        } catch (IOException e) {
+            Config.exitWithError("could not use data directory " + dataDir + ": " + e);
         } catch (Exception e) {
-            e.printStackTrace();
+            Config.exitWithError("Barrel could not start: " + e);
         }
     }
 }

@@ -74,6 +74,10 @@ para os Barrels"). A alternativa (registar na URLQueue) obrigaria a Gateway a co
 - Lê `googol.properties` (ou o ficheiro em `args[0]`) com `java.util.Properties`, em UTF-8.
 - `get`, `getInt` e `getList` (valores separados por vírgulas); uma chave em falta dá
   `IllegalArgumentException("Missing property: ...")`, uma mensagem clara em vez de `NullPointerException`.
+  Um valor não numérico dá `"Property X must be an integer, found: abc"`.
+- `exitWithError(msg)`: usado pelos `main()` para **erros previsíveis no arranque** (ficheiro de
+  configuração inexistente, valor inválido, porto ocupado). Mostra `Error: ...` numa linha e termina
+  com código 1, **sem stack trace** (ponto obrigatório "não apresenta erros/exceções").
 - `applyLocalHostname()` define `java.rmi.server.hostname`, ou seja, **o IP que fica escrito dentro
   dos stubs que esta máquina exporta**. Sem isto, um stub criado na máquina #2 podia dizer
   "liga-me em 127.0.0.1" e a máquina #1 ligava a si própria. É essencial para os **callbacks
@@ -92,13 +96,31 @@ para os Barrels"). A alternativa (registar na URLQueue) obrigaria a Gateway a co
   mantém acentos e remove repetidos. Exemplo: "UC-2026" dá `uc` e `2026`.
 - Usado **pelo Downloader (texto) e pelo Barrel (pesquisa)**: se normalizassem de forma
   diferente, uma pesquisa por "Coimbra" podia não encontrar "coimbra".
+- Usa `toLowerCase(Locale.ROOT)`: o resultado não depende da língua do sistema (em turco, "I"
+  minúsculo é "ı", o que partiria as pesquisas).
+
+### 3.3b `common.UrlNormalizer` (revisão dos passos 1-3)
+- `normalize(url)`: esquema e host em minúsculas, remove o porto por omissão (80/443) e o
+  fragmento `#...`, e o caminho vazio passa a `/`. O caminho e a query mantêm-se (o servidor
+  distingue maiúsculas no caminho). Devolve `null` se não for http/https ou não tiver host.
+- Exemplo: `HTTPS://WWW.UC.PT:443#topo` e `https://www.uc.pt` dão ambos `https://www.uc.pt/`.
+- Usado pela **fila** (todos os URLs que entram) e pelo **Downloader** (links). Sem isto, a mesma
+  página era visitada duas vezes e as ligações recebidas ficavam divididas entre duas "páginas",
+  o que estragava a ordenação.
 
 ### 3.4 `common.SearchResult` (Passo 3)
 - URL, título, citação e número de ligações recebidas. `Serializable` (passa por valor do Barrel
   para a Gateway e para o Client).
 
 ### 3.5 `queue.URLQueue`: fila de URLs (Passo 2)
-**Interface remota `URLQueueInterface`:** `addUrl`, `addUrls`, `retryUrl` e `downloaderReady`.
+**Interface remota `URLQueueInterface`:** `addUrl`, `addUrls`, `addUrlPriority`, `retryUrl`,
+`downloaderReady` e `ping`.
+
+**URLs dos utilizadores (`addUrlPriority`):** o enunciado diz que um URL introduzido pelo
+utilizador deve ser visitado "assim que possível". Como o crawler acrescenta milhares de links ao
+fim da fila, o URL do utilizador entra pelo **início** (`addFirst`). Se já estava na fila à espera,
+é retirado (`remove`, atómico) e passa para o início. Devolve `false` se já foi (ou está a ser)
+visitado. A Gateway vai usar este método (Passo 5).
 
 **Funcionamento (modelo "push" com callbacks):**
 1. Ao arrancar, cria o **RMI registry** (`LocateRegistry.createRegistry(rmi.port)`) e faz
@@ -111,7 +133,7 @@ para os Barrels"). A alternativa (registar na URLQueue) obrigaria a Gateway a co
 **Estruturas (todas de `java.util.concurrent`, t04):**
 | Estrutura | Para quê |
 |---|---|
-| `LinkedBlockingQueue<String> urls` | URLs por visitar; `take()` bloqueia se estiver vazia (sem espera ativa) |
+| `LinkedBlockingDeque<String> urls` | URLs por visitar; `take()` bloqueia se estiver vazia (sem espera ativa); é uma *deque* para os URLs prioritários entrarem pelo início |
 | `LinkedBlockingQueue<DownloaderInterface> availableDownloaders` | Downloaders livres |
 | `Set<String> seen` (`ConcurrentHashMap.newKeySet()`) | URLs que já entraram na fila. `seen.add(url)` é atómico: só o primeiro a adicionar põe o URL na fila, o que garante que **cada URL é indexado por um só Downloader** |
 | `ConcurrentHashMap<String,Integer> retries` | Tentativas por URL; `merge` incrementa de forma atómica |
@@ -123,24 +145,44 @@ faz `take()`.
 **Falhas tratadas:**
 - Download falhado: o Downloader chama `retryUrl`, e o URL volta à fila até
   `queue.max.retries` (2) vezes; depois é descartado (evita ciclos infinitos com links mortos).
-- Downloader morto: `download()` lança `RemoteException`. O URL volta à fila e o downloader
-  **não volta à lista de livres** (fica descartado).
+- Downloader morto: `download()` lança `RemoteException`. O URL volta ao **início** da fila (não
+  perde a vez) e o downloader **não volta à lista de livres** (fica descartado).
+- Erro inesperado (`RuntimeException`) no dispatcher: é apanhado, o URL volta ao início e o ciclo
+  continua. Sem isto, a thread dispatcher morria sem aviso e a fila deixava de distribuir URLs.
+- Arranque com o porto ocupado (outra fila a correr): `ExportException`, que dá a mensagem clara
+  `Error: could not use port ...`.
 
 ### 3.6 `downloader.Downloader`: web crawler (Passo 2)
-- `main`: lê a configuração, faz `lookup` da fila, **exporta-se** com
-  `UnicastRemoteObject.exportObject(this, 0)` (porto 0 = qualquer porto livre) e chama
-  `downloaderReady(self)`.
+- `main`: lê a configuração, **exporta-se** com `UnicastRemoteObject.exportObject(this, 0)`
+  (porto 0 = qualquer porto livre), liga-se à fila e inicia a thread de verificação, que faz o
+  primeiro `downloaderReady(self)`.
 - `download(url)` (chamado pela fila) **cria uma thread e retorna logo**: assim a chamada remota
   do dispatcher não fica bloqueada durante o download.
 - `parsePage`: `Jsoup.connect(url).get()` seguido de `extract(url, doc)`, que obtém o título, a
-  citação (os primeiros 150 caracteres do texto), as palavras (`Tokenizer`) e os links (`absUrl`,
-  só `http`/`https`, sem `#...`).
+  citação (os primeiros 150 caracteres do texto), as palavras **do título e do texto** (`Tokenizer`;
+  o `<title>` está no `<head>`, fora do `body`, e sem isto uma palavra que só aparecesse no
+  título não era encontrada) e os links (`absUrl` + `UrlNormalizer`).
 - Envia todos os links de uma vez com `addUrls` (**uma** chamada remota por página em vez de uma por link).
 - No `finally` faz a pausa (`downloader.delay.ms`) e chama sempre `downloaderReady`: mesmo depois de um
   erro o Downloader volta a ficar disponível (no projeto de referência do ano passado isto
   falhava e o downloader ficava parado).
 - **Paralelismo:** cada processo trata um URL de cada vez; o paralelismo vem de correr vários
   processos Downloader (em uma ou várias máquinas).
+
+**Tolerância a falhas da fila (ligação perdida, fila reiniciada):**
+- Problema: um Downloader **livre** está só à espera de um callback e nunca chama a fila. Se a fila
+  reiniciar, a nova fila não o conhece e ele ficava parado para sempre.
+- Solução: uma thread de verificação (`heartbeatLoop`) chama `queue.ping()` a cada
+  `downloader.reconnect.ms`. Se falhar, `reconnect()` faz `lookup` no registry até a fila voltar
+  (mostra "URLQueue not available ..., retrying") e o Downloader regista-se na nova fila.
+- O mesmo `reconnect()` é usado no arranque: **o Downloader pode arrancar antes da fila** e espera
+  por ela, em vez de rebentar.
+- Para não se registar **duas vezes** (o que lhe daria dois URLs ao mesmo tempo), o estado
+  `busy` / `registeredWith` é protegido por um `lock`. A comparação usa `equals()` dos stubs
+  (compara o objeto remoto, não a referência Java): depois de uma falha de rede passageira o novo
+  stub é igual ao antigo e não há novo registo.
+- As mensagens de falha mostram só a causa numa linha (`reason(e)`): a mensagem de uma
+  `RemoteException` ocupa várias linhas e parece uma stack trace.
 
 ### 3.7 `barrel.Barrel`: Index Storage Barrel (Passo 3)
 **Interface remota `BarrelInterface`:** `storePage(PageData)`, `search(query, page)`,
@@ -199,7 +241,7 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 
 | Requisito | Pts | Estado | Como |
 |---|---|---|---|
-| Indexar novo URL introduzido pelo utilizador | 8 | ⏳ | `addUrl` existe; falta o Client e a Gateway |
+| Indexar novo URL introduzido pelo utilizador | 8 | 🟡 | `addUrlPriority` (vai para o início da fila); falta o Client e a Gateway |
 | Indexar iterativa/recursivamente | 8 | ✅ | Downloader devolve links à fila |
 | Pesquisar páginas com um conjunto de palavras | 8 | 🟡 | `Barrel.search` (AND) feito; falta ligar à Gateway e ao Client |
 | Ordenar por ligações recebidas | 8 | 🟡 | `Barrel.search` |
@@ -212,9 +254,10 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 | Balanceamento de carga nas pesquisas | 5 | ⏳ | Passo 5 |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
 | Gateway recupera de avarias internas | 5 | ⏳ | Passo 5 |
-| Cada URL indexado por um só Downloader | 5 | ✅ | Conjunto `seen` atómico |
+| Cada URL indexado por um só Downloader | 5 | ✅ | Conjunto `seen` atómico + URLs normalizados |
 | `.properties` sem recompilar | obrig. | ✅ | `Config` |
 | Corre em várias máquinas | obrig. | ✅ | `rmi.host` + `java.rmi.server.hostname` |
+| Não apresenta erros/exceções | obrig. | ✅ (até agora) | Mensagens `Error: ...` sem stack trace; Downloader espera pela fila e volta a ligar-se |
 
 ---
 
@@ -226,8 +269,13 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 2. **Barrel morto com `kill -9`:** perde o que recebeu depois da última gravação (no máximo
    `barrel.save.interval.ms`). *Correção planeada:* Passo 7, em que o Barrel, ao arrancar, copia o que lhe falta
    de um Barrel ativo.
-3. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes. (O enunciado
-   deixa o desenho da fila livre.)
+3. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes (o enunciado
+   deixa o desenho da fila livre). Os Downloaders, esses, recuperam sozinhos: detetam a falha pelo
+   `ping`, esperam que a fila volte e voltam a registar-se.
+4. **Erros permanentes também são tentados de novo** (ex.: 404, PDF): 2 tentativas inúteis por
+   URL. Melhoria possível: só repetir erros temporários (timeout, falha de ligação, 5xx).
+5. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
+   durante cada gravação. Melhoria possível: copiar o índice sob o lock e gravar fora dele.
 
 ---
 
@@ -251,6 +299,14 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
   invertido.
 - **Porque é que os resultados com o mesmo número de links são ordenados pelo URL?** Para a ordem ser
   sempre a mesma: a página 2 de uma pesquisa não pode repetir resultados da página 1.
+- **O que acontece se a fila reiniciar?** Os Downloaders fazem `ping` periódico; quando falha,
+  procuram a fila de novo no registry até ela voltar e registam-se na nova fila.
+- **Porque é que o URL do utilizador vai para o início da fila?** O enunciado pede que seja visitado
+  "assim que possível"; no fim, ficaria atrás de milhares de links descobertos pelo crawler.
+- **Porque é que se normalizam os URLs?** `https://uc.pt` e `https://uc.pt/` são a mesma página;
+  sem normalização era visitada duas vezes e as ligações recebidas ficavam divididas.
+- **Como evitas que um Downloader se registe duas vezes na fila?** O estado `busy`/`registeredWith`
+  é protegido por um `lock` e os stubs são comparados com `equals()` (mesmo objeto remoto).
 
 ---
 
@@ -260,23 +316,29 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 
 | # | Teste | Resultado |
 |---|---|---|
-| 1 | Configuração: valores, listas, UTF-8 e chave em falta | PASS |
-| 2 | Extração: título, citação de 150 caracteres, palavras normalizadas, links sem `#` e só http/https | PASS |
-| 3 | Fila: URL repetido é entregue uma só vez | PASS |
-| 4 | Fila: no máximo 2 novas tentativas para um URL que falha | PASS |
-| 5 | Indexação iterativa: 20 páginas visitadas a partir de uma | PASS |
-| 6 | Dois Downloaders em paralelo recebem URLs diferentes | PASS |
-| 7 | Página 404 tentada 3 vezes e descartada | PASS |
-| 8 | Downloader morto: a fila deteta a falha, devolve o URL e o outro Downloader continua | PASS |
-| 9 | 30 URLs, cada um descarregado uma única vez | PASS |
-| 10 | Barrel: pesquisa só devolve páginas com todos os termos | PASS |
-| 11 | Barrel: ordenação por ligações recebidas | PASS |
-| 12 | Barrel: backlinks | PASS |
-| 13 | Barrel: guardar a mesma página duas vezes não altera o índice | PASS |
-| 14 | Barrel: paginação 10/10/5/0 | PASS |
-| 15 | Barrel: índice recuperado depois de reiniciar; ficheiro corrompido não impede o arranque | PASS |
-| 16 | Processo Barrel morto (`destroyForcibly`) e reiniciado recupera o índice | PASS |
-| 17 | Logs sem exceções inesperadas | PASS |
+| 1 | Configuração: valores, listas, UTF-8, chave em falta, valor não numérico, ficheiro inexistente | PASS |
+| 2 | Extração: título, citação de 150 caracteres, palavras normalizadas (incluindo as do título), links normalizados e só http/https | PASS |
+| 3 | Normalização de URLs equivalentes; rejeita URLs não http/https | PASS |
+| 4 | Fila: URL repetido ou equivalente é entregue uma só vez | PASS |
+| 5 | Fila: no máximo 2 novas tentativas para um URL que falha | PASS |
+| 6 | Fila: URL do utilizador passa à frente; URL já visitado não se repete | PASS |
+| 7 | Fila: downloader que falha (RemoteException ou erro inesperado): URL volta ao início e o dispatcher continua | PASS |
+| 8 | Indexação iterativa: 20 páginas visitadas a partir de uma | PASS |
+| 9 | Dois Downloaders em paralelo recebem URLs diferentes | PASS |
+| 10 | Página 404 tentada 3 vezes e descartada | PASS |
+| 11 | Downloader morto: a fila deteta a falha, devolve o URL e o outro Downloader continua | PASS |
+| 12 | 30 URLs, cada um descarregado uma única vez | PASS |
+| 13 | Downloader arrancado antes da fila espera por ela e regista-se | PASS |
+| 14 | Fila reiniciada: o Downloader deteta (ping), volta a ligar-se e continua a trabalhar | PASS |
+| 15 | Erros no arranque (porto ocupado, configuração inexistente ou inválida): mensagem clara, sem stack trace | PASS |
+| 16 | Barrel: pesquisa só devolve páginas com todos os termos | PASS |
+| 17 | Barrel: ordenação por ligações recebidas | PASS |
+| 18 | Barrel: backlinks | PASS |
+| 19 | Barrel: guardar a mesma página duas vezes não altera o índice | PASS |
+| 20 | Barrel: paginação 10/10/5/0 | PASS |
+| 21 | Barrel: índice recuperado depois de reiniciar; ficheiro corrompido não impede o arranque | PASS |
+| 22 | Processo Barrel morto (`destroyForcibly`) e reiniciado recupera o índice | PASS |
+| 23 | Logs sem exceções inesperadas | PASS |
 
 ---
 
@@ -288,4 +350,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 2 | Fila com vários Downloaders, URLs únicos, novas tentativas, `PageData` | `f7bfb94` |
 | — | Repositório só com ficheiros da entrega | `4177eea` |
 | 3 | Index Storage Barrel (índice, pesquisa AND, ranking, backlinks, persistência) | `ed74d86` |
-| — | README e este resumo | (este commit) |
+| — | README e este resumo | `c4cca52` |
+| — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `revisao-passos-1-3` |
