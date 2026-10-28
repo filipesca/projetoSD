@@ -14,6 +14,7 @@ uma Gateway RMI serve de única porta de entrada para os clientes.
 | `downloader.Downloader`: crawler (jsoup) | ✅ |
 | `barrel.Barrel`: índice invertido persistente | ✅ |
 | Reliable multicast Downloader → Barrels | ✅ |
+| Sincronização de Barrels (Barrel novo ou reiniciado copia o que lhe falta de outro) | ✅ |
 | `gateway.Gateway`: pesquisa, backlinks, indexação, estatísticas, balanceamento e failover | ✅ |
 | `client.Client`: UI de consola com failover e estatísticas em tempo real | ✅ |
 
@@ -132,4 +133,5 @@ porto do registry e portos dinâmicos para os objetos exportados).
 ## Apagar os dados de teste
 
 O índice de cada Barrel fica em `data/<nome>.ser` (pasta definida em `barrel.data.dir`).
-Para começar do zero, parar os Barrels e apagar a pasta `data/`.
+Para começar do zero, parar **todos** os Barrels e apagar a pasta `data/` em **todas** as máquinas
+(um Barrel que arranca copia o índice de outro Barrel ativo; se algum continuar ligado, os dados voltam).

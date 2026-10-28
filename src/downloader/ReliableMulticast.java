@@ -26,8 +26,9 @@ import java.util.concurrent.LinkedBlockingDeque;
       uma só vez, mesmo que um ACK se perca e a mensagem seja retransmitida).
     - Acordo: enquanto o Barrel estiver na lista da Gateway (ou continuar a responder), todas as
       mensagens lhe acabam por ser entregues. Se a Gateway o retirar (sem heartbeat há demasiado
-      tempo) e as entregas estiverem a falhar, as mensagens pendentes para ele são descartadas e o
-      Barrel recupera o estado ao arrancar (passo 7).
+      tempo) e as entregas estiverem a falhar, as mensagens pendentes para ele são descartadas: quando
+      voltar, o Barrel recebe da Gateway a indicação de registo novo e copia o que lhe falta de outro
+      Barrel ativo (sincronização por snapshot, ver Barrel.synchronize).
 */
 
 public class ReliableMulticast {

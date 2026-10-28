@@ -57,7 +57,7 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
 | Reliable multicast | `downloader.ReliableMulticast` / `Barrel.deliver` | ✅ Passo 4 |
 | Gateway | `gateway` | ✅ Passo 4 (registo de Barrels) e Passo 5 (pesquisa, balanceamento, failover, indexação, estatísticas) |
 | Client | `client` | ✅ Passo 6 |
-| Sincronização de Barrels | `barrel` | ⏳ Passo 7 |
+| Sincronização de Barrels | `barrel` | ✅ Passo 7 |
 
 ### Decisão: onde se registam os Barrels?
 Um programa **não pode fazer `bind` num registry de outra máquina** (o `rebind` remoto é
@@ -236,6 +236,29 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 a cada `barrel.heartbeat.ms`. Se a Gateway estiver em baixo, continua a tentar ("Gateway not
 available"); quando a Gateway reinicia, o Barrel volta a aparecer na lista sozinho.
 
+**Sincronização com os outros Barrels (Passo 7, extra "novo Barrel sincroniza-se com os existentes"):**
+- **Snapshot:** `getSnapshot()` devolve o índice serializado para `byte[]` **dentro do lock** (se
+  devolvesse o objeto, o RMI serializava-o depois de o método retornar, já sem lock, enquanto outras
+  threads o alteravam).
+- **União (`merge`):** o índice só cresce, por isso juntar é uma união de conjuntos (páginas, palavras,
+  backlinks): a ordem não importa e repetir não altera nada. `lastSeq` fica com o **máximo** por
+  Downloader, por isso as mensagens pendentes que já vieram no snapshot são filtradas como repetidas.
+- **No arranque:** o 1.º heartbeat regista o Barrel com `pronto = false`: está em `getBarrels()`, por
+  isso os Downloaders já lhe enviam as mensagens novas, mas a Gateway não lhe manda pesquisas nem o
+  mostra nas estatísticas. Depois copia o snapshot do Barrel com mais páginas (se falhar, o seguinte),
+  grava e regista-se como pronto. Sem outro Barrel, usa só o ficheiro. Recupera assim o que perdeu
+  num `kill -9` (recebido depois da última gravação) e o que os Downloaders descartaram.
+- **Lease expirada:** `registerBarrel` devolve `true` se o registo é novo (Barrel retirado por falta de
+  heartbeat, ou Gateway reiniciada). Os Downloaders podem ter descartado mensagens para ele, por isso
+  volta a sincronizar-se, mas continua pronto (decisão: depois de um reinício da Gateway os dois
+  Barrels deixariam de responder ao mesmo tempo).
+- **Mensagens em falta (`checkMissing`, a cada heartbeat):** pede aos outros o vetor `lastSeq`
+  (`getLastSeqs`). Se outro Barrel tinha, **no heartbeat anterior**, um seq maior para algum Downloader,
+  faltam mensagens a este: sincroniza-se com ele. Comparar com o heartbeat anterior evita sincronizar
+  por causa de mensagens que estão só a caminho. Cobre a janela em que um Barrel novo já tirou o
+  snapshot mas o Downloader ainda não o conhece (o Downloader só atualiza a lista a cada
+  `downloader.reconnect.ms`) e envia só aos outros.
+
 ### 3.8 `downloader.ReliableMulticast`: reliable multicast sobre RMI (Passo 4)
 **Objetivo (t08):** os Barrels têm de ter **informação idêntica** mesmo com **avarias de omissão**
 (mensagens ou respostas perdidas, Barrel temporariamente em baixo).
@@ -290,7 +313,7 @@ pela sincronização entre Barrels do Passo 7.
 **Interface remota `GatewayInterface`:**
 | Para quem | Métodos |
 |---|---|
-| Barrels | `registerBarrel(nome, stub, páginas, palavras)` (heartbeat) |
+| Barrels | `registerBarrel(nome, stub, páginas, palavras, pronto)` (heartbeat) |
 | Downloaders | `getBarrels()` (lista para o multicast) |
 | Clientes | `indexUrl(url)`, `search(query, page)`, `getBacklinks(url)`, `getStats()`, `subscribeStats(listener)`, `unsubscribeStats(listener)`, `ping()` (passo 6) |
 
@@ -403,6 +426,7 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 | Leases (DGC, t06) | Registo dos Barrels na Gateway com prazo, renovado por heartbeat |
 | Modelo de falhas: *crash*, omissão (t02) | Downloader morto, URL inválido, Barrel morto e reiniciado, Gateway e fila reiniciadas |
 | Reliable multicast: integridade, validade, acordo, FIFO (t08) | `ReliableMulticast` (ACK + retransmissão) e `Barrel.deliver` (filtro de repetidas) |
+| Deteção de omissões por números de sequência (t08) e transferência de estado entre réplicas | `Barrel.checkMissing` (vetores `lastSeq`) e `Barrel.synchronize`/`merge` (snapshot + união) |
 | Identificadores de pedido e filtragem de duplicados (t05) | `(senderId, seq)` e `lastSeq` |
 
 ---
@@ -418,9 +442,10 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 | Páginas com ligação para uma página | 8 | ✅ | Client opção 3, ou `l N` num resultado → `Gateway.getBacklinks` |
 | Estatísticas em tempo real | 8 | ✅ | Client opção 4: `StatsListener` (callback), atualizações só quando mudam |
 | Resultados de 10 em 10 | 8 | ✅ | `PAGE_SIZE = 10`; Client com `s` seguinte / `a` anterior |
-| Barrels com informação idêntica (reliable multicast) | 5 | ✅ | `ReliableMulticast` + `Barrel.deliver`; testado com um Barrel morto e reiniciado |
+| Barrels com informação idêntica (reliable multicast) | 5 | ✅ | `ReliableMulticast` + `Barrel.deliver`; mensagens em falta detetadas pelos números de sequência e recuperadas por snapshot (`checkMissing`, Passo 7) |
 | Funciona com ≥1 Barrel + Gateway | 5 | ✅ | Indexação e pesquisa continuam só com 1 Barrel (testado com B2 em baixo) |
-| Barrels recuperam o estado depois de um crash | 5 | 🟡 | Persistência em ficheiro; o Passo 7 cobre o que falta |
+| Barrels recuperam o estado depois de um crash | 5 | ✅ | Ficheiro + sincronização com um Barrel ativo ao arrancar (testado com `kill -9` antes de gravar) |
+| Extra: novo Barrel sincroniza-se com os existentes | +5 | ✅ | `Barrel.synchronize` (snapshot + união); só responde a pesquisas depois de sincronizado |
 | Balanceamento de carga nas pesquisas | 5 | ✅ | Por desempenho: probabilidade proporcional a 1/tempo médio |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
 | Gateway recupera de avarias internas | 5 | 🟡 | Failover entre Barrels, URLs pendentes com a fila em baixo, Barrels voltam a registar-se e o Client repete o pedido e volta a subscrever as estatísticas se a Gateway reiniciar; falta gravar o estado da Gateway (limitação 7) |
@@ -436,13 +461,13 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 1. **Downloader que morre a meio de um download:** o URL em curso perde-se, porque a fila só deteta
    downloaders mortos quando lhes tenta enviar um URL. *Correção planeada:* a fila guarda
    o URL em curso de cada downloader e verifica periodicamente se o downloader está vivo; se não estiver, o URL volta à fila.
-2. **Barrel morto com `kill -9`:** perde o que recebeu depois da última gravação (no máximo
-   `barrel.save.interval.ms`). O multicast não cobre este caso porque o ACK é dado antes de o
-   Barrel gravar em disco, e o Downloader já descartou essas mensagens. *Correção planeada:*
-   Passo 7, em que o Barrel, ao arrancar, copia o que lhe falta de um Barrel ativo.
-3. **Downloader morre com mensagens pendentes para um Barrel em baixo**, ou um Barrel é retirado da
-   lista pela Gateway (sem heartbeat durante `gateway.barrel.timeout.ms`): esse Barrel fica sem
-   essas páginas. *Correção planeada:* Passo 7.
+2. ~~Barrel morto com `kill -9` perde o que recebeu depois da última gravação~~ **Resolvido no
+   Passo 7:** ao reiniciar, copia o que lhe falta de um Barrel ativo. Só se os **dois** Barrels
+   morrerem ao mesmo tempo com `kill -9` se perde o que receberam depois da última gravação (no
+   máximo `barrel.save.interval.ms`), porque o ACK é dado antes de gravar em disco.
+3. ~~Downloader morre com mensagens pendentes para um Barrel em baixo, ou Barrel retirado da lista~~
+   **Resolvido no Passo 7:** sincronização no arranque, quando a lease expirou, e deteção de mensagens
+   em falta pelos números de sequência (`checkMissing`).
 4. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes (o enunciado
    deixa o desenho da fila livre). Os Downloaders, esses, recuperam sozinhos: detetam a falha pelo
    `ping`, esperam que a fila volte e voltam a registar-se.
@@ -513,7 +538,15 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
   `StatsListener` e subscreve-se; a Gateway faz callback `statsUpdated()` sempre que as
   estatísticas mudam (compara com as últimas enviadas). Sem alterações, não envia nada.
 - **Como é que a Gateway sabe o tamanho do índice de cada Barrel?** O Barrel envia-o em cada
-  heartbeat (`registerBarrel(nome, stub, páginas, palavras)`).
+  heartbeat (`registerBarrel(nome, stub, páginas, palavras, pronto)`).
+- **Porque é que a sincronização não usa um log de mensagens?** O índice só cresce (conjuntos), por
+  isso juntar dois índices é uma união: comutativa, idempotente, não importa a ordem nem repetir.
+  Basta copiar o índice inteiro de outro Barrel (snapshot); um log teria de ser guardado e limpo.
+- **Como sabe um Barrel que lhe faltam mensagens?** Cada Downloader numera as mensagens (seq) e envia
+  todas a todos os Barrels, por ordem. A cada heartbeat o Barrel compara o seu vetor `lastSeq` com o
+  dos outros (`getLastSeqs`): se outro já tinha, no heartbeat anterior, um seq maior, faltam-lhe
+  mensagens e sincroniza-se. Foi assim que se fechou a janela em que um Barrel novo já tinha tirado o
+  snapshot mas o Downloader ainda não sabia que ele existia (encontrada pelo teste de sistema).
 - **E se a fila estiver em baixo quando um utilizador pede para indexar um URL?** A Gateway guarda o
   URL e reenvia-o periodicamente até a fila o aceitar; responde `PENDING` ao cliente.
 - **Porque não fizeram cache?** Era opcional; sem cache os resultados estão sempre atualizados e
@@ -580,6 +613,14 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 49 | Client: estatísticas por callback; Gateway reiniciada é detetada (ping) e o Client volta a subscrever | PASS |
 | 50 | Sistema: Client real (processo, stdin) pesquisa com navegação, backlinks e indexação pela Gateway | PASS |
 | 51 | Sistema: Gateway reiniciada com o Client no ecrã de estatísticas → volta a subscrever, continua a pesquisar e sai sem erros | PASS |
+| 52 | Gateway: Barrel a sincronizar-se recebe mensagens mas não pesquisas nem conta como ativo; `registerBarrel` indica registo novo (1.º registo e lease expirada) | PASS |
+| 53 | Barrel.merge: união de páginas, palavras e backlinks; idempotente; `lastSeq` máximo; dois Barrels ficam idênticos | PASS |
+| 54 | Barrel.synchronize: Barrel novo copia o índice de um ativo (ignora um em baixo) e grava-o; sozinho usa o índice local | PASS |
+| 55 | Barrel.checkMissing: mensagem enviada só ao outro Barrel é detetada pelos números de sequência e recuperada; mensagem a caminho não provoca sincronização | PASS |
+| 56 | Sistema: B2 reiniciado recupera as páginas em falta (sincronização + retransmissão) e fica idêntico | PASS |
+| 57 | Sistema: Gateway reiniciada → registo novo → os Barrels sincronizam-se de novo e continuam idênticos | PASS |
+| 58 | Sistema: Barrel novo (vazio) sincroniza-se, só depois responde a pesquisas, e fica idêntico | PASS |
+| 59 | Sistema: Barrel morto antes de gravar (`kill -9`) recupera ao reiniciar o que faltava a partir de outro Barrel | PASS |
 
 ---
 
@@ -595,4 +636,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `0d4b624` |
 | 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `112375f` |
 | 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `e8020cb` |
-| 6 | Client: menu de consola, 10 em 10 com navegação, failover (repete o pedido), estatísticas por callback com nova subscrição se a Gateway reiniciar | `passo6-client` |
+| 6 | Client: menu de consola, 10 em 10 com navegação, failover (repete o pedido), estatísticas por callback com nova subscrição se a Gateway reiniciar | `164c192` |
+| 7 | Sincronização de Barrels: snapshot + união no arranque e com lease expirada, Barrel só pronto depois de sincronizado, deteção de mensagens em falta por números de sequência | `passo7-sync` |
