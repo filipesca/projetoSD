@@ -9,9 +9,8 @@ data/
 *.ser
 *.log
 
-# IDEs (mantém-se apenas a configuração partilhada do VS Code)
-.vscode/*
-!.vscode/settings.json
+# IDEs
+.vscode/
 .idea/
 *.iml
 
@@ -21,3 +20,6 @@ Thumbs.db
 
 # Ficheiros de apoio da IA (não vão para o repositório)
 CLAUDE.md
+
+# Testes (usados só localmente, não fazem parte da entrega)
+tests/
