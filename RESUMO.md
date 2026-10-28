@@ -55,7 +55,7 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
 | Downloader | `downloader` | ✅ Passo 2 |
 | Barrel | `barrel` | ✅ Passo 3 |
 | Reliable multicast | `downloader.ReliableMulticast` / `Barrel.deliver` | ✅ Passo 4 |
-| Gateway | `gateway` | 🟡 Passo 4 (registo de Barrels); Passo 5 (pesquisa, balanceamento, estatísticas) |
+| Gateway | `gateway` | ✅ Passo 4 (registo de Barrels) e Passo 5 (pesquisa, balanceamento, failover, indexação, estatísticas) |
 | Client | `client` | ⏳ Passo 6 |
 | Sincronização de Barrels | `barrel` | ⏳ Passo 7 |
 
@@ -286,13 +286,66 @@ retransmissão pelo emissor porque é mais simples e cobre as avarias de omissã
 enunciado. O caso "Downloader morre com mensagens por entregar a um Barrel em baixo" fica coberto
 pela sincronização entre Barrels do Passo 7.
 
-### 3.9 `gateway.Gateway` (Passo 4: registo dos Barrels)
-**Interface remota `GatewayInterface`:** `registerBarrel(nome, stub)` e `getBarrels()`.
-- Guarda `nome → (stub, último heartbeat)` num `ConcurrentHashMap`.
-- **Lease** (como no DGC do RMI, t06): o registo só é válido durante `gateway.barrel.timeout.ms`;
-  o Barrel renova-o com o heartbeat. Uma thread retira os Barrels cujo prazo expirou ("Barrel X
-  removed: no heartbeat"). `remove(chave, valor)` garante que não remove um registo renovado entretanto.
+### 3.9 `gateway.Gateway` (Passos 4 e 5)
+**Interface remota `GatewayInterface`:**
+| Para quem | Métodos |
+|---|---|
+| Barrels | `registerBarrel(nome, stub, páginas, palavras)` (heartbeat) |
+| Downloaders | `getBarrels()` (lista para o multicast) |
+| Clientes | `indexUrl(url)`, `search(query, page)`, `getBacklinks(url)`, `getStats()`, `subscribeStats(listener)`, `unsubscribeStats(listener)` |
+
+A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Barrels.
+
+**Registo dos Barrels (lease, t06):**
+- Guarda `nome → (stub, último heartbeat, páginas, palavras)` num `ConcurrentHashMap`.
+- O registo só é válido durante `gateway.barrel.timeout.ms`; o Barrel renova-o com o heartbeat,
+  que leva também o **tamanho atual do índice** (usado nas estatísticas, sem a Gateway ter de
+  perguntar). Uma thread retira os Barrels cujo prazo expirou. `remove(chave, valor)` garante que
+  não remove um registo renovado entretanto.
 - Cria o **seu próprio registry** (`gateway.port`) e faz `rebind(gateway.name)`.
+
+**Pesquisa com balanceamento por desempenho (decisão do grupo):**
+- A Gateway mede o tempo de resposta de cada pesquisa, por Barrel (`System.nanoTime`).
+- O Barrel é **sorteado com probabilidade proporcional a 1/tempo médio**: um Barrel duas vezes mais
+  rápido recebe o dobro das pesquisas. Se escolhesse sempre o mais rápido, com tempos parecidos um
+  Barrel recebia tudo e o outro nunca era usado nem medido. Um Barrel sem medições recebe o peso do
+  mais rápido, para começar a ser medido.
+- **Sem cache** (decisão do grupo): cada pesquisa vai a um Barrel, por isso os resultados estão
+  sempre atualizados e todas as pesquisas contam para o tempo médio.
+
+**Failover (enunciado 5.1: "a Gateway deverá recuperar fazendo o mesmo pedido a outro Barrel"):**
+- `callBarrels` tenta os Barrels pela ordem escolhida. Com `RemoteException`, marca o Barrel como
+  **suspeito** e repete o **mesmo pedido** no seguinte. O cliente não vê o erro.
+- Um Barrel suspeito deixa de receber pesquisas e de contar como ativo nas estatísticas, mas
+  **continua na lista dos Downloaders** até a lease expirar. Assim os Downloaders continuam a
+  guardar as mensagens para ele (se a Gateway o retirasse de imediato, os Downloaders descartavam-nas
+  e ele perdia as páginas). Se estiver vivo, o próximo heartbeat limpa a marca.
+- Sem nenhum Barrel disponível: `NoBarrelAvailableException` (exceção própria, diferente de
+  `RemoteException`: a Gateway está a funcionar, por isso o cliente mostra a mensagem em vez de
+  tentar de novo a ligação).
+
+**Indexação de URLs dos utilizadores (`indexUrl`):**
+- Normaliza o URL e chama `addUrlPriority` na fila (início da fila).
+- Devolve `QUEUED`, `ALREADY_KNOWN`, `INVALID` ou `PENDING`.
+- **A fila em baixo não faz perder pedidos** (enunciado: "as introduções de URLs para indexação não
+  se percam, realizando retries"): o URL vai para `pendingUrls` e uma thread reenvia-o, por ordem,
+  a cada `gateway.queue.retry.ms`, até a fila o aceitar.
+
+**Estatísticas em tempo real (callbacks, sem polling):**
+- `Stats` (record): top 10 de pesquisas e, para cada Barrel ativo, páginas, palavras, número de
+  pesquisas e **tempo médio em décimas de segundo** (1 décima = 100 ms).
+- Top 10: conta só a **primeira página** de cada pesquisa (avançar nos resultados não é uma nova
+  pesquisa), com os termos normalizados e ordenados ("Coimbra universidade" = "universidade coimbra").
+- Os clientes subscrevem-se com `subscribeStats(StatsListener)`: o `StatsListener` é um objeto
+  remoto **do cliente** e a Gateway chama `statsUpdated(stats)` (**callback**, t06).
+- Sempre que algo pode ter mudado (pesquisa, Barrel novo, removido, suspeito, índice com outro
+  tamanho), `statsChanged()` calcula as estatísticas e **só as envia se forem diferentes das últimas**
+  (`equals` do record). Sem alterações não há envios, mesmo com heartbeats a chegar.
+- Os envios são feitos por uma thread própria (`notifier`), para que um cliente lento não atrase as
+  pesquisas. Cliente que já não responde (`RemoteException`) é retirado da lista.
+- A lista de clientes é uma `CopyOnWriteArrayList` (t04): é percorrida nos envios enquanto outros
+  clientes se subscrevem.
+
 - Erros previsíveis no arranque (porto ocupado, configuração) dão `Error: ...`, como nos restantes programas.
 
 ---
@@ -305,7 +358,8 @@ pela sincronização entre Barrels do Passo 7.
 | `UnicastRemoteObject.exportObject` e stubs (t06) | Queue, Downloader, Barrel |
 | RMI registry: `createRegistry`, `rebind`, `lookup` (t06) | Queue cria; Downloader faz `lookup` |
 | Passagem por valor (`Serializable`) vs por referência (`Remote`) (t06) | `PageData`/`SearchResult` por valor; stubs dos Downloaders e Barrels por referência |
-| **Callbacks** (t06) | A fila chama `download(url)` no Downloader |
+| **Callbacks** (t06) | A fila chama `download(url)` no Downloader; a Gateway chama `statsUpdated(stats)` nos clientes |
+| `CopyOnWriteArrayList` (t04) | Lista de clientes subscritos às estatísticas |
 | Semântica *at-most-once* do RMI (t05) | Uma `RemoteException` não diz se o método chegou a executar; por isso `storePage` é idempotente (repetir é seguro) |
 | Threads, `synchronized`, `java.util.concurrent` (t04) | Dispatcher, `BlockingQueue`, `ConcurrentHashMap`, Barrel `synchronized` |
 | `wait`/`notifyAll` em ciclo (t04) | `ReliableMulticast.multicast` espera enquanto não há Barrels |
@@ -320,19 +374,19 @@ pela sincronização entre Barrels do Passo 7.
 
 | Requisito | Pts | Estado | Como |
 |---|---|---|---|
-| Indexar novo URL introduzido pelo utilizador | 8 | 🟡 | `addUrlPriority` (vai para o início da fila); falta o Client e a Gateway |
+| Indexar novo URL introduzido pelo utilizador | 8 | 🟡 | `Gateway.indexUrl` → `addUrlPriority` (início da fila; pendente se a fila estiver em baixo); falta o Client |
 | Indexar iterativa/recursivamente | 8 | ✅ | Downloader devolve links à fila |
-| Pesquisar páginas com um conjunto de palavras | 8 | 🟡 | `Barrel.search` (AND) feito; falta ligar à Gateway e ao Client |
-| Ordenar por ligações recebidas | 8 | 🟡 | `Barrel.search` |
-| Páginas com ligação para uma página | 8 | 🟡 | `Barrel.getBacklinks` |
-| Estatísticas em tempo real | 8 | ⏳ | Passo 5/6 |
-| Resultados de 10 em 10 | 8 | 🟡 | `PAGE_SIZE = 10` |
+| Pesquisar páginas com um conjunto de palavras | 8 | 🟡 | `Gateway.search` → `Barrel.search` (AND); falta o Client |
+| Ordenar por ligações recebidas | 8 | 🟡 | `Barrel.search`; falta o Client |
+| Páginas com ligação para uma página | 8 | 🟡 | `Gateway.getBacklinks`; falta o Client |
+| Estatísticas em tempo real | 8 | 🟡 | `Stats` + callback `StatsListener`, enviadas só quando mudam; falta o Client |
+| Resultados de 10 em 10 | 8 | 🟡 | `PAGE_SIZE = 10`, página pedida à Gateway; falta o Client |
 | Barrels com informação idêntica (reliable multicast) | 5 | ✅ | `ReliableMulticast` + `Barrel.deliver`; testado com um Barrel morto e reiniciado |
-| Funciona com ≥1 Barrel + Gateway | 5 | 🟡 | A indexação continua só com 1 Barrel; falta a pesquisa pela Gateway (Passo 5) |
+| Funciona com ≥1 Barrel + Gateway | 5 | ✅ | Indexação e pesquisa continuam só com 1 Barrel (testado com B2 em baixo) |
 | Barrels recuperam o estado depois de um crash | 5 | 🟡 | Persistência em ficheiro; o Passo 7 cobre o que falta |
-| Balanceamento de carga nas pesquisas | 5 | ⏳ | Passo 5 |
+| Balanceamento de carga nas pesquisas | 5 | ✅ | Por desempenho: probabilidade proporcional a 1/tempo médio |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
-| Gateway recupera de avarias internas | 5 | ⏳ | Passo 5 |
+| Gateway recupera de avarias internas | 5 | ✅ | Failover entre Barrels, URLs pendentes com a fila em baixo, Barrels voltam a registar-se se a Gateway reiniciar |
 | Cada URL indexado por um só Downloader | 5 | ✅ | Conjunto `seen` atómico + URLs normalizados |
 | `.properties` sem recompilar | obrig. | ✅ | `Config` |
 | Corre em várias máquinas | obrig. | ✅ | `rmi.host` + `java.rmi.server.hostname` |
@@ -403,6 +457,24 @@ pela sincronização entre Barrels do Passo 7.
   dentro do prazo, a lease expira e é retirado da lista.
 - **Porque é que cada servidor tem o seu registry?** Para que a morte da fila não apague o registo
   da Gateway, e vice-versa.
+- **Como funciona o balanceamento de carga?** Por desempenho: a Gateway mede o tempo médio de cada
+  Barrel e sorteia o Barrel com probabilidade proporcional a 1/tempo médio. O mais rápido recebe
+  mais pedidos, mas todos continuam a ser usados (e medidos).
+- **O que acontece se um Barrel falhar a meio de uma pesquisa?** A Gateway apanha a
+  `RemoteException`, marca-o como suspeito e faz o mesmo pedido ao Barrel seguinte; o cliente recebe
+  a resposta normalmente.
+- **Porque é que a Gateway não retira logo da lista um Barrel que falhou?** Porque os Downloaders
+  usam essa lista: se o Barrel saísse, descartavam as mensagens guardadas para ele e o Barrel perdia
+  essas páginas quando reiniciasse. Fica "suspeito" (sem pesquisas) até a lease expirar.
+- **Como funcionam as estatísticas em tempo real sem polling?** O cliente exporta um
+  `StatsListener` e subscreve-se; a Gateway faz callback `statsUpdated()` sempre que as
+  estatísticas mudam (compara com as últimas enviadas). Sem alterações, não envia nada.
+- **Como é que a Gateway sabe o tamanho do índice de cada Barrel?** O Barrel envia-o em cada
+  heartbeat (`registerBarrel(nome, stub, páginas, palavras)`).
+- **E se a fila estiver em baixo quando um utilizador pede para indexar um URL?** A Gateway guarda o
+  URL e reenvia-o periodicamente até a fila o aceitar; responde `PENDING` ao cliente.
+- **Porque não fizeram cache?** Era opcional; sem cache os resultados estão sempre atualizados e
+  todas as pesquisas medem o tempo de resposta dos Barrels.
 - **O que acontece se não houver Barrels?** O Downloader espera (`wait`) antes de enviar a página;
   nada se perde.
 
@@ -447,6 +519,16 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 31 | Sistema: B2 morto → indexação continua com B1 → B2 reiniciado recebe as 10 páginas retransmitidas e fica idêntico | PASS |
 | 32 | Sistema: Gateway reiniciada → Barrels voltam a registar-se, Downloader volta a obter a lista sem retirar Barrels | PASS |
 | 33 | Sistema: segunda Gateway no mesmo porto dá mensagem clara | PASS |
+| 34 | Gateway: balanceamento por desempenho (os dois Barrels usados; o mais rápido recebe mais) | PASS |
+| 35 | Gateway: failover quando um Barrel falha; o suspeito sai das pesquisas e das estatísticas mas continua para o multicast; heartbeat devolve-o | PASS |
+| 36 | Gateway: sem Barrels dá `NoBarrelAvailableException`; backlinks com URL normalizado | PASS |
+| 37 | Estatísticas: enviadas ao subscrever e quando mudam; heartbeat igual não gera envio; cliente morto deixa de receber | PASS |
+| 38 | Estatísticas: top 10 com termos normalizados e só a primeira página; tempo médio em décimas de segundo | PASS |
+| 39 | Gateway.indexUrl: inválido, já conhecido, novo; com a fila em baixo fica pendente e é entregue por ordem quando ela volta | PASS |
+| 40 | Sistema: pesquisa e backlinks pela Gateway iguais aos dos Barrels; URL do utilizador indexado e pesquisável | PASS |
+| 41 | Sistema: estatísticas por callback (top 10, tamanhos, tempo médio), pesquisas distribuídas pelos dois Barrels; sem alterações não há envios | PASS |
+| 42 | Sistema: B2 em baixo → pesquisas continuam (failover), B2 deixa de contar como ativo; volta depois de reiniciar | PASS |
+| 43 | Sistema: URL pedido com a fila em baixo fica pendente, é reenviado e indexado quando a fila volta | PASS |
 
 ---
 
@@ -460,4 +542,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 3 | Index Storage Barrel (índice, pesquisa AND, ranking, backlinks, persistência) | `ed74d86` |
 | — | README e este resumo | `c4cca52` |
 | — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `0d4b624` |
-| 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `passo4-multicast` |
+| 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `112375f` |
+| 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `passo5-gateway` |
