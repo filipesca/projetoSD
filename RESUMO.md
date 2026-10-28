@@ -169,6 +169,9 @@ faz `take()`.
   o `<title>` está no `<head>`, fora do `body`, e sem isto uma palavra que só aparecesse no
   título não era encontrada) e os links (`absUrl` + `UrlNormalizer`).
 - Envia todos os links de uma vez com `addUrls` (**uma** chamada remota por página em vez de uma por link).
+  Se a fila não responder nesse momento (`sendLinks`), a página já foi para os Barrels, por isso o URL
+  **não** é tratado como falhado: o Downloader volta a ligar-se à fila (`reconnect`, espera que ela
+  reinicie) e repete o envio dos mesmos links até conseguir (a fila ignora os que já viu).
 - No `finally` faz a pausa (`downloader.delay.ms`) e chama sempre `downloaderReady`: mesmo depois de um
   erro o Downloader volta a ficar disponível (no projeto de referência do ano passado isto
   falhava e o downloader ficava parado).
@@ -352,7 +355,19 @@ A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Ba
 - Devolve `QUEUED`, `ALREADY_KNOWN`, `INVALID` ou `PENDING`.
 - **A fila em baixo não faz perder pedidos** (enunciado: "as introduções de URLs para indexação não
   se percam, realizando retries"): o URL vai para `pendingUrls` e uma thread reenvia-o, por ordem,
-  a cada `gateway.queue.retry.ms`, até a fila o aceitar.
+  a cada `gateway.queue.retry.ms`, até a fila o aceitar. O URL só sai da lista **depois** de a fila o
+  aceitar (`peekFirst` → envio → `removeFirstOccurrence`).
+
+**Recuperação de um crash da própria Gateway (estado em ficheiro):**
+- O enunciado diz que a Gateway "não tem de" guardar dados (não o proíbe): o índice continua só nos
+  Barrels. Decisão do grupo: guardar num ficheiro (`gateway.data.file`) só o que não se recalcula:
+  **URLs pendentes** e **contagens de pesquisas** (top 10). Os tempos médios por Barrel não são
+  gravados: são medições e voltam a ser medidos (decisão do grupo).
+- Os URLs pendentes são gravados **antes de responder** `PENDING` e de novo quando saem da lista;
+  as contagens de pesquisas a cada `gateway.save.interval.ms` (se mudaram) e ao terminar normalmente.
+- Escrita atómica (`.tmp` + `ATOMIC_MOVE`), como o Barrel; ficheiro corrompido → arranca vazia.
+- Ao arrancar, carrega o ficheiro: os URLs pendentes voltam a ser reenviados e o top 10 continua.
+  Os Barrels voltam a registar-se por heartbeat e o Client volta a subscrever as estatísticas.
 
 **Estatísticas em tempo real (callbacks, sem polling):**
 - `Stats` (record): top 10 de pesquisas e, para cada Barrel ativo, páginas, palavras, número de
@@ -448,7 +463,7 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 | Extra: novo Barrel sincroniza-se com os existentes | +5 | ✅ | `Barrel.synchronize` (snapshot + união); só responde a pesquisas depois de sincronizado |
 | Balanceamento de carga nas pesquisas | 5 | ✅ | Por desempenho: probabilidade proporcional a 1/tempo médio |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
-| Gateway recupera de avarias internas | 5 | 🟡 | Failover entre Barrels, URLs pendentes com a fila em baixo, Barrels voltam a registar-se e o Client repete o pedido e volta a subscrever as estatísticas se a Gateway reiniciar; falta gravar o estado da Gateway (limitação 7) |
+| Gateway recupera de avarias internas | 5 | ✅ | Failover entre Barrels, URLs pendentes com a fila em baixo; se a Gateway reiniciar: estado (URLs pendentes, top 10) lido do ficheiro, Barrels voltam a registar-se e o Client repete o pedido e volta a subscrever as estatísticas |
 | Cada URL indexado por um só Downloader | 5 | ✅ | Conjunto `seen` atómico + URLs normalizados |
 | `.properties` sem recompilar | obrig. | ✅ | `Config` |
 | Corre em várias máquinas | obrig. | ✅ | `rmi.host` + `java.rmi.server.hostname` |
@@ -475,12 +490,10 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
    URL. Melhoria possível: só repetir erros temporários (timeout, falha de ligação, 5xx).
 6. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
    durante cada gravação. Melhoria possível: copiar o índice sob o lock e gravar fora dele.
-7. **O estado da Gateway está em memória:** se a Gateway morrer, perde os URLs pendentes
-   (`pendingUrls`, pedidos feitos com a fila em baixo) e o top 10 das pesquisas. *Correção planeada:*
-   gravar esse estado em ficheiro, como o Barrel.
-8. **Fila em baixo no fim de um download:** se `addUrls` falhar depois de a página ter sido enviada
-   aos Barrels, os links dessa página perdem-se (e o URL é tratado como falhado). *Correção planeada:*
-   repetir `addUrls` depois de voltar a ligar-se à fila.
+7. ~~O estado da Gateway está em memória~~ **Resolvido:** URLs pendentes e contagens de pesquisas
+   gravados em `gateway.data.file` e carregados ao arrancar. Os tempos médios por Barrel recomeçam.
+8. ~~Fila em baixo no fim de um download perde os links~~ **Resolvido:** `Downloader.sendLinks` volta
+   a ligar-se à fila e repete o envio dos links até conseguir.
 
 ---
 
@@ -621,6 +634,10 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 57 | Sistema: Gateway reiniciada → registo novo → os Barrels sincronizam-se de novo e continuam idênticos | PASS |
 | 58 | Sistema: Barrel novo (vazio) sincroniza-se, só depois responde a pesquisas, e fica idêntico | PASS |
 | 59 | Sistema: Barrel morto antes de gravar (`kill -9`) recupera ao reiniciar o que faltava a partir de outro Barrel | PASS |
+| 60 | Gateway reiniciada recupera do ficheiro o top 10 e os URLs pendentes, entregues por ordem quando a fila volta | PASS |
+| 61 | Gateway: ficheiro de estado corrompido não impede o arranque | PASS |
+| 62 | Downloader: com a fila em baixo depois de indexar a página, guarda os links e envia-os quando ela volta | PASS |
+| 63 | Sistema: Gateway morta (`destroyForcibly`) e reiniciada recupera do ficheiro o top 10 das pesquisas | PASS |
 
 ---
 
@@ -637,4 +654,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `112375f` |
 | 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `e8020cb` |
 | 6 | Client: menu de consola, 10 em 10 com navegação, failover (repete o pedido), estatísticas por callback com nova subscrição se a Gateway reiniciar | `164c192` |
-| 7 | Sincronização de Barrels: snapshot + união no arranque e com lease expirada, Barrel só pronto depois de sincronizado, deteção de mensagens em falta por números de sequência | `passo7-sync` |
+| 7 | Sincronização de Barrels: snapshot + união no arranque e com lease expirada, Barrel só pronto depois de sincronizado, deteção de mensagens em falta por números de sequência | `d695490` |
+| — | Limitações 7 e 8: estado da Gateway em ficheiro (URLs pendentes, top 10); Downloader não perde os links se a fila cair | `limitacoes-7-8` |

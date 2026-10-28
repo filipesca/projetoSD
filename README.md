@@ -107,6 +107,8 @@ linha `Error: ...`.
 | `gateway.host`, `gateway.port`, `gateway.name` | Máquina, porto do registry e nome da Gateway |
 | `gateway.barrel.timeout.ms` | Tempo sem heartbeat até a Gateway retirar um Barrel da lista |
 | `gateway.queue.retry.ms` | Intervalo entre tentativas de reenviar à fila os URLs pedidos enquanto ela estava em baixo |
+| `gateway.data.file` | Ficheiro onde a Gateway guarda os URLs pendentes e as contagens de pesquisas (recupera-os se reiniciar) |
+| `gateway.save.interval.ms` | Intervalo entre gravações das contagens de pesquisas da Gateway |
 | `downloader.delay.ms` | Pausa entre páginas de cada Downloader |
 | `downloader.reconnect.ms` | Intervalo entre verificações da fila e da lista de Barrels, e entre tentativas de nova ligação |
 | `multicast.retry.ms` | Intervalo entre retransmissões a um Barrel que não respondeu |
@@ -132,6 +134,7 @@ porto do registry e portos dinâmicos para os objetos exportados).
 
 ## Apagar os dados de teste
 
-O índice de cada Barrel fica em `data/<nome>.ser` (pasta definida em `barrel.data.dir`).
-Para começar do zero, parar **todos** os Barrels e apagar a pasta `data/` em **todas** as máquinas
+O índice de cada Barrel fica em `data/<nome>.ser` (pasta definida em `barrel.data.dir`) e o estado
+da Gateway (URLs pendentes e top 10 de pesquisas) em `data/gateway.ser` (`gateway.data.file`).
+Para começar do zero, parar a Gateway e **todos** os Barrels e apagar a pasta `data/` em **todas** as máquinas
 (um Barrel que arranca copia o índice de outro Barrel ativo; se algum continuar ligado, os dados voltam).
