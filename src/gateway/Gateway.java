@@ -96,7 +96,7 @@ public class Gateway implements GatewayInterface {
     private final Map<String, Integer> searchCounts = new ConcurrentHashMap<>();
 
     // Clientes subscritos às estatísticas (CopyOnWriteArrayList: percorrida enquanto outros se subscrevem)
-    private final List<StatsListener> listeners = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<StatsListener> listeners = new CopyOnWriteArrayList<>();
 
     // Últimas estatísticas enviadas (para só enviar quando mudam) e thread que faz os envios,
     // para que um cliente lento ou avariado não atrase as pesquisas
@@ -371,7 +371,9 @@ public class Gateway implements GatewayInterface {
 
     @Override
     public void subscribeStats(StatsListener listener) {
-        listeners.add(listener);
+        // Idempotente: um cliente que volta a subscrever (ex.: depois de uma falha de rede passageira)
+        // não fica duas vezes na lista (equals dos stubs compara o objeto remoto)
+        listeners.addIfAbsent(listener);
         // O novo cliente recebe logo as estatísticas atuais
         notifier.submit(() -> send(listener, getStats()));
     }
@@ -379,6 +381,11 @@ public class Gateway implements GatewayInterface {
     @Override
     public void unsubscribeStats(StatsListener listener) {
         listeners.remove(listener);
+    }
+
+    @Override
+    public void ping() {
+        // Não faz nada: se a chamada chegar aqui, a Gateway está ativa
     }
 
     // Algo que pode alterar as estatísticas aconteceu: calcula-as e envia-as numa thread à parte
