@@ -25,19 +25,20 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
 ## 2. Arquitetura
 
 ```
-                 addUrls / downloaderReady (RMI)
-   ┌───────────┐ ─────────────────────────────▶ ┌──────────┐
-   │Downloader │                                │ URLQueue │  (cria o RMI registry)
-   │  (vários) │ ◀───────────────────────────── └──────────┘
+                 addUrls / downloaderReady / ping (RMI)
+   ┌───────────┐ ─────────────────────────────────▶ ┌──────────┐
+   │Downloader │                                    │ URLQueue │  (registry próprio: rmi.port)
+   │  (vários) │ ◀───────────────────────────────── └──────────┘
    └─────┬─────┘      download(url) (callback)
-         │ storePage(PageData) — reliable multicast (passo 4)
+         │  deliver(IndexMessage) — reliable multicast (fila + thread por Barrel, ACK, retransmissão)
+         │  getBarrels() à Gateway, periodicamente (lista de Barrels ativos)
          ▼
    ┌──────────┐  ┌──────────┐
    │ Barrel 1 │  │ Barrel 2 │   réplicas idênticas, índice persistente em data/<nome>.ser
    └────▲─────┘  └────▲─────┘
-        │ search / getBacklinks / tamanhos (RMI)
+        │ registerBarrel (heartbeat) ▲   search / getBacklinks / tamanhos (passo 5)
    ┌────┴─────────────┴────┐
-   │        Gateway        │   (passo 5) única entrada dos clientes; Barrels registam-se nela
+   │        Gateway        │   registry próprio: gateway.port; lista de Barrels com "lease"
    └───────────▲───────────┘
                │ RMI (+ callback das estatísticas)
           ┌────┴───┐
@@ -51,10 +52,10 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
 |---|---|---|
 | Configuração | `common.Config` | ✅ Passo 1 |
 | Fila de URLs | `queue` | ✅ Passo 2 |
-| Downloader | `downloader` | ✅ Passo 2 (ainda não envia para os Barrels) |
-| Barrel | `barrel` | ✅ Passo 3 (ainda não ligado) |
-| Reliable multicast | `downloader` / `barrel` | ⏳ Passo 4 |
-| Gateway | `gateway` | ⏳ Passo 4 (registo de Barrels) e Passo 5 (pesquisa, estatísticas) |
+| Downloader | `downloader` | ✅ Passo 2 |
+| Barrel | `barrel` | ✅ Passo 3 |
+| Reliable multicast | `downloader.ReliableMulticast` / `Barrel.deliver` | ✅ Passo 4 |
+| Gateway | `gateway` | 🟡 Passo 4 (registo de Barrels); Passo 5 (pesquisa, balanceamento, estatísticas) |
 | Client | `client` | ⏳ Passo 6 |
 | Sincronização de Barrels | `barrel` | ⏳ Passo 7 |
 
@@ -65,6 +66,11 @@ da máquina #1. Solução escolhida: **os Barrels registam-se na Gateway por um 
 (`registerBarrel`), enviando a sua referência remota (stub). Os Downloaders pedem à Gateway a
 lista de Barrels. É a solução sugerida no enunciado ("a Gateway receber uma referência remota
 para os Barrels"). A alternativa (registar na URLQueue) obrigaria a Gateway a consultar a Queue.
+
+### Decisão: um registry por servidor
+A Gateway e a URLQueue criam **cada uma o seu registry** (`gateway.port` e `rmi.port`). Se
+partilhassem o registry criado por um deles, a morte desse processo apagava também o registo do
+outro. Assim, cada componente pode avariar e reiniciar sem afetar os restantes.
 
 ---
 
@@ -219,6 +225,76 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 - Arranque: `java barrel.Barrel <nome> [config]`. O nome vem nos argumentos para as duas máquinas
   poderem usar o mesmo `.properties`.
 
+**Receção por multicast (`deliver`, Passo 4):**
+- Recebe `IndexMessage(senderId, seq, page)`. Guarda em `lastSeq` o último `seq` entregue de cada
+  Downloader e **ignora mensagens com `seq <= lastSeq`** (retransmissões já recebidas). É a
+  propriedade de **integridade** do reliable multicast: cada mensagem é entregue uma só vez.
+- `lastSeq` é gravado com o índice, por isso o filtro continua a funcionar depois de reiniciar.
+- O retorno normal de `deliver` é o **ACK** para o Downloader.
+
+**Registo na Gateway (heartbeat, Passo 4):** uma thread chama `gateway.registerBarrel(nome, stub)`
+a cada `barrel.heartbeat.ms`. Se a Gateway estiver em baixo, continua a tentar ("Gateway not
+available"); quando a Gateway reinicia, o Barrel volta a aparecer na lista sozinho.
+
+### 3.8 `downloader.ReliableMulticast`: reliable multicast sobre RMI (Passo 4)
+**Objetivo (t08):** os Barrels têm de ter **informação idêntica** mesmo com **avarias de omissão**
+(mensagens ou respostas perdidas, Barrel temporariamente em baixo).
+
+**Algoritmo (ACK + retransmissão, FIFO por emissor):**
+1. Cada Downloader tem um `senderId` (UUID gerado no arranque) e numera as mensagens com `seq`
+   crescente: `IndexMessage(senderId, seq, page)`.
+2. `multicast(page)` coloca a mensagem na **fila de cada Barrel** (um `Channel` por Barrel, com a sua
+   `LinkedBlockingDeque` e a sua thread). Os Barrels são servidos **em paralelo**: um Barrel lento ou
+   avariado não atrasa os outros.
+3. A thread do canal envia as mensagens **por ordem**: `stub.deliver(m)`. Retorno normal = ACK, e
+   a mensagem sai da fila.
+4. `RemoteException` (omissão/avaria): a mensagem volta ao **início** da fila (mantém a ordem) e é
+   **retransmitida** a cada `multicast.retry.ms` até ao ACK.
+5. O Barrel filtra repetidas por `(senderId, seq)`, o que trata o caso do **ACK perdido**: o Barrel
+   processou a mensagem, mas a resposta não chegou; a retransmissão é ignorada.
+
+**Propriedades (t08):**
+| Propriedade | Como é garantida |
+|---|---|
+| Integridade (entregue no máximo uma vez) | Filtro `lastSeq` no Barrel |
+| Validade (o emissor entrega o que envia) | A mensagem fica na fila de cada Barrel até ao ACK |
+| Acordo (se um Barrel correto entrega, todos entregam) | Retransmissão até ao ACK para todos os Barrels ativos |
+| Ordem FIFO por emissor | Uma fila e uma thread por Barrel; só avança depois do ACK |
+
+**Lista de Barrels:** o Downloader pede `getBarrels()` à Gateway a cada `downloader.reconnect.ms`
+(thread própria, independente da fila):
+- Barrel novo: é criado um canal (recebe as mensagens a partir daí; o que já existia vem da
+  sincronização do Passo 7).
+- Barrel reiniciado (novo stub): o canal passa a usar o novo stub e as mensagens pendentes são
+  entregues, por isso o Barrel **recupera o que perdeu enquanto esteve em baixo**.
+- Barrel que **não está na lista e cujas entregas falham** (retirado pela Gateway: sem heartbeat
+  há mais de `gateway.barrel.timeout.ms`): o canal é removido e as mensagens pendentes são
+  descartadas (evita memória ilimitada); o Barrel recupera o estado ao arrancar (Passo 7).
+- Barrel que não está na lista **mas responde** (ex.: a Gateway acabou de reiniciar e o Barrel ainda
+  não renovou o registo): **mantém-se**. Encontrámos este caso nos testes: sem esta regra, um
+  reinício da Gateway fazia o Downloader deixar de enviar para um Barrel ativo.
+
+**Sem Barrels:** `multicast()` espera com `wait()` em ciclo (t04) até `updateBarrels` fazer
+`notifyAll()`. A página não se perde; o Downloader fica parado até haver um Barrel.
+
+**A Gateway não está no caminho dos dados:** se a Gateway avariar, os Downloaders continuam a
+enviar para a última lista conhecida.
+
+**Porque não R-multicast (t08)?** No R-multicast, cada Barrel reenvia a mensagem aos outros na
+primeira receção, o que garante acordo mesmo que o emissor morra a meio. Escolhemos ACK +
+retransmissão pelo emissor porque é mais simples e cobre as avarias de omissão pedidas no
+enunciado. O caso "Downloader morre com mensagens por entregar a um Barrel em baixo" fica coberto
+pela sincronização entre Barrels do Passo 7.
+
+### 3.9 `gateway.Gateway` (Passo 4: registo dos Barrels)
+**Interface remota `GatewayInterface`:** `registerBarrel(nome, stub)` e `getBarrels()`.
+- Guarda `nome → (stub, último heartbeat)` num `ConcurrentHashMap`.
+- **Lease** (como no DGC do RMI, t06): o registo só é válido durante `gateway.barrel.timeout.ms`;
+  o Barrel renova-o com o heartbeat. Uma thread retira os Barrels cujo prazo expirou ("Barrel X
+  removed: no heartbeat"). `remove(chave, valor)` garante que não remove um registo renovado entretanto.
+- Cria o **seu próprio registry** (`gateway.port`) e faz `rebind(gateway.name)`.
+- Erros previsíveis no arranque (porto ocupado, configuração) dão `Error: ...`, como nos restantes programas.
+
 ---
 
 ## 4. Conceitos das aulas usados
@@ -232,8 +308,11 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 | **Callbacks** (t06) | A fila chama `download(url)` no Downloader |
 | Semântica *at-most-once* do RMI (t05) | Uma `RemoteException` não diz se o método chegou a executar; por isso `storePage` é idempotente (repetir é seguro) |
 | Threads, `synchronized`, `java.util.concurrent` (t04) | Dispatcher, `BlockingQueue`, `ConcurrentHashMap`, Barrel `synchronized` |
-| Modelo de falhas: *crash*, omissão (t02) | Downloader morto, URL inválido, Barrel morto e reiniciado |
-| Reliable multicast: integridade, validade, acordo (t08) | ⏳ Passo 4 |
+| `wait`/`notifyAll` em ciclo (t04) | `ReliableMulticast.multicast` espera enquanto não há Barrels |
+| Leases (DGC, t06) | Registo dos Barrels na Gateway com prazo, renovado por heartbeat |
+| Modelo de falhas: *crash*, omissão (t02) | Downloader morto, URL inválido, Barrel morto e reiniciado, Gateway e fila reiniciadas |
+| Reliable multicast: integridade, validade, acordo, FIFO (t08) | `ReliableMulticast` (ACK + retransmissão) e `Barrel.deliver` (filtro de repetidas) |
+| Identificadores de pedido e filtragem de duplicados (t05) | `(senderId, seq)` e `lastSeq` |
 
 ---
 
@@ -248,8 +327,8 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
 | Páginas com ligação para uma página | 8 | 🟡 | `Barrel.getBacklinks` |
 | Estatísticas em tempo real | 8 | ⏳ | Passo 5/6 |
 | Resultados de 10 em 10 | 8 | 🟡 | `PAGE_SIZE = 10` |
-| Barrels com informação idêntica (reliable multicast) | 5 | ⏳ | Passo 4 |
-| Funciona com ≥1 Barrel + Gateway | 5 | ⏳ | Passo 5 |
+| Barrels com informação idêntica (reliable multicast) | 5 | ✅ | `ReliableMulticast` + `Barrel.deliver`; testado com um Barrel morto e reiniciado |
+| Funciona com ≥1 Barrel + Gateway | 5 | 🟡 | A indexação continua só com 1 Barrel; falta a pesquisa pela Gateway (Passo 5) |
 | Barrels recuperam o estado depois de um crash | 5 | 🟡 | Persistência em ficheiro; o Passo 7 cobre o que falta |
 | Balanceamento de carga nas pesquisas | 5 | ⏳ | Passo 5 |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
@@ -267,14 +346,18 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
    downloaders mortos quando lhes tenta enviar um URL. *Correção planeada:* a fila guarda
    o URL em curso de cada downloader e verifica periodicamente se o downloader está vivo; se não estiver, o URL volta à fila.
 2. **Barrel morto com `kill -9`:** perde o que recebeu depois da última gravação (no máximo
-   `barrel.save.interval.ms`). *Correção planeada:* Passo 7, em que o Barrel, ao arrancar, copia o que lhe falta
-   de um Barrel ativo.
-3. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes (o enunciado
+   `barrel.save.interval.ms`). O multicast não cobre este caso porque o ACK é dado antes de o
+   Barrel gravar em disco, e o Downloader já descartou essas mensagens. *Correção planeada:*
+   Passo 7, em que o Barrel, ao arrancar, copia o que lhe falta de um Barrel ativo.
+3. **Downloader morre com mensagens pendentes para um Barrel em baixo**, ou um Barrel é retirado da
+   lista pela Gateway (sem heartbeat durante `gateway.barrel.timeout.ms`): esse Barrel fica sem
+   essas páginas. *Correção planeada:* Passo 7.
+4. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes (o enunciado
    deixa o desenho da fila livre). Os Downloaders, esses, recuperam sozinhos: detetam a falha pelo
    `ping`, esperam que a fila volte e voltam a registar-se.
-4. **Erros permanentes também são tentados de novo** (ex.: 404, PDF): 2 tentativas inúteis por
+5. **Erros permanentes também são tentados de novo** (ex.: 404, PDF): 2 tentativas inúteis por
    URL. Melhoria possível: só repetir erros temporários (timeout, falha de ligação, 5xx).
-5. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
+6. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
    durante cada gravação. Melhoria possível: copiar o índice sob o lock e gravar fora dele.
 
 ---
@@ -307,6 +390,21 @@ t04), porque as pesquisas da Gateway e as inserções dos Downloaders chegam em 
   sem normalização era visitada duas vezes e as ligações recebidas ficavam divididas.
 - **Como evitas que um Downloader se registe duas vezes na fila?** O estado `busy`/`registeredWith`
   é protegido por um `lock` e os stubs são comparados com `equals()` (mesmo objeto remoto).
+- **Explica o teu reliable multicast.** Cada mensagem leva `(senderId, seq)`; há uma fila e uma
+  thread por Barrel; o retorno de `deliver` é o ACK; com `RemoteException` a mensagem volta ao
+  início da fila e é retransmitida; o Barrel ignora `seq` já recebidos. Dá integridade, validade,
+  acordo (para Barrels ativos) e ordem FIFO por emissor.
+- **E se o ACK se perder?** O Downloader retransmite; o Barrel já tem `lastSeq >= seq` e ignora a
+  mensagem, por isso a página não é aplicada duas vezes.
+- **E se um Barrel estiver em baixo durante a indexação?** As mensagens ficam na fila desse Barrel e
+  são retransmitidas a cada `multicast.retry.ms`; quando reinicia (e volta a registar-se), recebe-as
+  todas por ordem. Testado: B2 morto, 10 páginas indexadas, B2 reiniciado fica idêntico a B1.
+- **Como sabe a Gateway que um Barrel morreu?** Pelo heartbeat: se o Barrel não renovar o registo
+  dentro do prazo, a lease expira e é retirado da lista.
+- **Porque é que cada servidor tem o seu registry?** Para que a morte da fila não apague o registo
+  da Gateway, e vice-versa.
+- **O que acontece se não houver Barrels?** O Downloader espera (`wait`) antes de enviar a página;
+  nada se perde.
 
 ---
 
@@ -339,6 +437,16 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 21 | Barrel: índice recuperado depois de reiniciar; ficheiro corrompido não impede o arranque | PASS |
 | 22 | Processo Barrel morto (`destroyForcibly`) e reiniciado recupera o índice | PASS |
 | 23 | Logs sem exceções inesperadas | PASS |
+| 24 | Barrel.deliver: mensagem repetida ignorada; outros emissores entregues; filtro sobrevive a reinício | PASS |
+| 25 | Multicast: todos os Barrels recebem tudo por ordem; Barrel com omissões recebe tudo por retransmissão | PASS |
+| 26 | Multicast: ACK perdido → retransmissão filtrada pelo Barrel (página aplicada uma vez) | PASS |
+| 27 | Multicast: sem Barrels espera; Barrel retirado e a falhar é descartado; Barrel ativo fora da lista mantém-se | PASS |
+| 28 | Gateway: lease renovada por heartbeat; Barrel sem heartbeat é retirado e volta ao registar-se | PASS |
+| 29 | Sistema: 2 Barrels registam-se na Gateway e ficam com índices idênticos (20 páginas) | PASS |
+| 30 | Sistema: pesquisa nos Barrels reais (AND, ranking, 10 em 10, backlinks) | PASS |
+| 31 | Sistema: B2 morto → indexação continua com B1 → B2 reiniciado recebe as 10 páginas retransmitidas e fica idêntico | PASS |
+| 32 | Sistema: Gateway reiniciada → Barrels voltam a registar-se, Downloader volta a obter a lista sem retirar Barrels | PASS |
+| 33 | Sistema: segunda Gateway no mesmo porto dá mensagem clara | PASS |
 
 ---
 
@@ -351,4 +459,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | — | Repositório só com ficheiros da entrega | `4177eea` |
 | 3 | Index Storage Barrel (índice, pesquisa AND, ranking, backlinks, persistência) | `ed74d86` |
 | — | README e este resumo | `c4cca52` |
-| — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `revisao-passos-1-3` |
+| — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `0d4b624` |
+| 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `passo4-multicast` |

@@ -4,6 +4,7 @@ import common.Config;
 import common.PageData;
 import common.Tokenizer;
 import common.UrlNormalizer;
+import gateway.GatewayInterface;
 import queue.URLQueueInterface;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -25,6 +26,9 @@ import java.util.HashSet;
     Tolerância a falhas da fila: uma thread verifica periodicamente (ping) se a fila
     está ativa. Se a fila avariar ou reiniciar, o Downloader volta a procurá-la no
     registry e regista-se de novo, sem ser preciso reiniciá-lo.
+
+    Envio para os Barrels: cada página é enviada a todos os Barrels ativos por reliable multicast
+    (ver ReliableMulticast). A lista de Barrels ativos é pedida periodicamente à Gateway.
 */
 
 public class Downloader implements DownloaderInterface {
@@ -55,12 +59,28 @@ public class Downloader implements DownloaderInterface {
     private boolean busy = false;
     private URLQueueInterface registeredWith = null;
 
+    // Onde está a Gateway (que tem a lista de Barrels ativos)
+    private final String gatewayHost;
+    private final int gatewayPort;
+    private final String gatewayName;
+
+    // Referência remota para a Gateway (só usada pela thread de verificação) e se já avisou que falhou
+    private GatewayInterface gateway;
+    private boolean gatewayWarned = false;
+
+    // Envio das páginas indexadas para todos os Barrels
+    private final ReliableMulticast multicast;
+
     public Downloader(Config config) {
         this.queueHost = config.getRmiHost();
         this.queuePort = config.getRmiPort();
         this.queueName = config.get("queue.name");
         this.delayMs = config.getInt("downloader.delay.ms");
         this.reconnectMs = config.getInt("downloader.reconnect.ms");
+        this.gatewayHost = config.get("gateway.host");
+        this.gatewayPort = config.getInt("gateway.port");
+        this.gatewayName = config.get("gateway.name");
+        this.multicast = new ReliableMulticast(config.getInt("multicast.retry.ms"));
     }
 
     @Override
@@ -75,12 +95,13 @@ public class Downloader implements DownloaderInterface {
                 System.out.println("Downloading: " + url);
                 PageData page = parsePage(url);
 
-                // Devolve os links encontrados à fila para indexação iterativa
-                queue.addUrls(new ArrayList<>(page.getLinks()));
-
-                // TODO (passo 4): enviar a página para os Barrels por reliable multicast
+                // Envia a página a todos os Barrels (reliable multicast; espera se não houver nenhum ativo)
+                multicast.multicast(page);
                 System.out.println("Indexed: " + url + " | title: \"" + page.getTitle() + "\" | "
                         + page.getWords().size() + " words | " + page.getLinks().size() + " links");
+
+                // Devolve os links encontrados à fila para indexação iterativa
+                queue.addUrls(new ArrayList<>(page.getLinks()));
 
             } catch (Exception e) {
                 System.out.println("Failed to process URL: " + url + " (" + e + ")");
@@ -204,6 +225,36 @@ public class Downloader implements DownloaderInterface {
         }
     }
 
+    // Thread que pede periodicamente à Gateway a lista de Barrels ativos e atualiza o multicast.
+    // Se a Gateway estiver em baixo, mantém a última lista conhecida (os Barrels continuam a receber
+    // as páginas diretamente: a Gateway não está no caminho dos dados).
+    private void barrelListLoop() {
+        while (true) {
+            try {
+                if (gateway == null) {
+                    gateway = (GatewayInterface) LocateRegistry.getRegistry(gatewayHost, gatewayPort).lookup(gatewayName);
+                }
+                multicast.updateBarrels(gateway.getBarrels());
+                if (gatewayWarned) {
+                    System.out.println("Connected to Gateway at " + gatewayHost + ":" + gatewayPort);
+                    gatewayWarned = false;
+                }
+            } catch (Exception e) {
+                gateway = null; // na próxima tentativa volta a procurar a Gateway no registry
+                if (!gatewayWarned) {
+                    System.out.println("Gateway not available at " + gatewayHost + ":" + gatewayPort
+                            + ": using the last known list of Barrels, retrying every " + reconnectMs + " ms");
+                    gatewayWarned = true;
+                }
+            }
+            try {
+                Thread.sleep(reconnectMs);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+    }
+
     // Descrição de uma linha da causa de uma falha (a mensagem de uma RemoteException ocupa várias
     // linhas e inclui a exceção interna, o que parece uma stack trace para o utilizador)
     private static String reason(Exception e) {
@@ -220,6 +271,11 @@ public class Downloader implements DownloaderInterface {
             // Cria o downloader e exporta-o como um objeto remoto
             Downloader downloader = new Downloader(config);
             downloader.self = (DownloaderInterface) UnicastRemoteObject.exportObject(downloader, 0);
+
+            // Lista de Barrels (Gateway) numa thread própria, para não depender do estado da fila
+            Thread barrelList = new Thread(downloader::barrelListLoop, "barrel-list");
+            barrelList.setDaemon(true);
+            barrelList.start();
 
             // Liga-se à fila (espera por ela se ainda não estiver ativa) e inicia a verificação
             // periódica, que também faz o primeiro registo na fila
