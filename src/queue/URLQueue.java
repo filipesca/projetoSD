@@ -3,66 +3,108 @@ package queue;
 import common.Config;
 import downloader.DownloaderInterface;
 
+import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Queue;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+
+/*
+    Fila de URLs (programa separado).
+    - Guarda os URLs por visitar e o conjunto de URLs já vistos, para que cada URL
+      seja entregue a um único downloader.
+    - Guarda os downloaders livres; uma thread "dispatcher" junta um URL a um downloader livre.
+    Usa estruturas de java.util.concurrent (thread-safe) porque os métodos remotos
+    são chamados em paralelo por várias threads do RMI.
+*/
 
 public class URLQueue implements URLQueueInterface {
-    // Fila para guardar URLs
-    private final Queue<String> urls = new LinkedList<>();
 
-    // Downloader que vai processar os URLs
-    private DownloaderInterface downloader;
+    // URLs à espera de serem visitados (take() bloqueia enquanto a fila estiver vazia)
+    private final BlockingQueue<String> urls = new LinkedBlockingQueue<>();
 
-    public URLQueue(List<String> seeds) {
+    // URLs que já entraram na fila alguma vez (evita visitar o mesmo URL duas vezes)
+    private final Set<String> seen = ConcurrentHashMap.newKeySet();
+
+    // Número de vezes que cada URL já voltou à fila por falha no download
+    private final Map<String, Integer> retries = new ConcurrentHashMap<>();
+
+    // Downloaders livres (take() bloqueia enquanto não houver nenhum livre)
+    private final BlockingQueue<DownloaderInterface> availableDownloaders = new LinkedBlockingQueue<>();
+
+    // Número máximo de novas tentativas para um URL que falhou
+    private final int maxRetries;
+
+    public URLQueue(List<String> seeds, int maxRetries) {
+        this.maxRetries = maxRetries;
+
         // URLs iniciais (lidos do ficheiro de configuração)
-        urls.addAll(seeds);
+        for (String url : seeds) {
+            addUrl(url);
+        }
 
-        // Temporizador: 10 segundos
-        Timer timer = new Timer(true);
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                notifyDownloader();
+        // Thread que distribui os URLs pelos downloaders livres
+        Thread dispatcher = new Thread(this::dispatchLoop, "dispatcher");
+        dispatcher.setDaemon(true);
+        dispatcher.start();
+    }
+
+    @Override
+    public void addUrl(String url) {
+        // add() do Set é atómico: só o primeiro a adicionar o URL o coloca na fila
+        if (seen.add(url)) {
+            urls.add(url);
+        }
+    }
+
+    @Override
+    public void addUrls(List<String> newUrls) {
+        for (String url : newUrls) {
+            addUrl(url);
+        }
+    }
+
+    @Override
+    public void retryUrl(String url) {
+        // merge incrementa o contador de forma atómica
+        int attempts = retries.merge(url, 1, Integer::sum);
+        if (attempts <= maxRetries) {
+            System.out.println("Retry " + attempts + "/" + maxRetries + " for URL: " + url);
+            urls.add(url);
+        } else {
+            System.out.println("Giving up on URL after " + maxRetries + " retries: " + url);
+        }
+    }
+
+    @Override
+    public void downloaderReady(DownloaderInterface downloader) {
+        availableDownloaders.add(downloader);
+    }
+
+    // Ciclo do dispatcher: espera por um downloader livre e por um URL e entrega-o
+    private void dispatchLoop() {
+        while (true) {
+            String url = null;
+            try {
+                DownloaderInterface downloader = availableDownloaders.take();
+                url = urls.take();
+                System.out.println("Sending URL to downloader: " + url + " (queue size: " + urls.size() + ")");
+
+                // Callback: o download corre numa thread do downloader, por isso a chamada retorna logo
+                downloader.download(url);
+
+            } catch (RemoteException e) {
+                // O downloader avariou: é descartado (não volta a estar livre) e o URL volta à fila
+                System.out.println("Downloader unreachable, URL returned to queue: " + url);
+                urls.add(url);
+            } catch (InterruptedException e) {
+                return;
             }
-        }, 0, 10_000);
-    }
-
-    // Tira um URL da fila, "synchronized" para não haver conflitos de concorrência
-    public synchronized String takeUrl() {
-        return urls.poll();
-    }
-
-    // Adiciona um URL da fila, "synchronized" para não haver conflitos de concorrência
-    public synchronized void addUrl(String url) {
-        urls.add(url);
-    }
-
-    // Regista o downloader recebido
-    public synchronized void registerDownloader(DownloaderInterface downloader) {
-        this.downloader = downloader;
-        System.out.println("Downloader registered for callbacks.");
-    }
-
-    // Manda os URLs para o downloader
-    private void notifyDownloader() {
-        try {
-            if (downloader != null) {
-                String url = takeUrl();
-                if (url != null) {
-                    System.out.println("Notifying downloader of URL: " + url);
-
-                    // Callback, o método downloader é invocado
-                    downloader.download(url);
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
         }
     }
 
@@ -73,7 +115,7 @@ public class URLQueue implements URLQueueInterface {
             config.applyLocalHostname();
 
             // Cria o servidor e exporta-o como um objeto remoto
-            URLQueue server = new URLQueue(config.getList("queue.seeds"));
+            URLQueue server = new URLQueue(config.getList("queue.seeds"), config.getInt("queue.max.retries"));
             URLQueueInterface stub = (URLQueueInterface) UnicastRemoteObject.exportObject(server, 0);
 
             // Cria um RMI registry no porto e regista o stub (objeto remoto)
