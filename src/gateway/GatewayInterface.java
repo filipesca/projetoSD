@@ -30,7 +30,12 @@ public interface GatewayInterface extends Remote {
 
     // Regista (ou renova o registo de) um Barrel, com o tamanho atual do índice. Os Barrels chamam
     // este método periodicamente (heartbeat): se deixarem de o chamar, são retirados da lista.
-    void registerBarrel(String name, BarrelInterface barrel, int pages, int words) throws RemoteException;
+    // ready = false enquanto o Barrel se sincroniza ao arrancar: recebe as mensagens dos Downloaders
+    // (está em getBarrels) mas não recebe pesquisas nem conta como ativo nas estatísticas.
+    // Devolve true se o registo é novo (Barrel desconhecido ou lease expirada): os Downloaders podem
+    // ter descartado mensagens para ele, por isso o Barrel volta a sincronizar-se.
+    boolean registerBarrel(String name, BarrelInterface barrel, int pages, int words, boolean ready)
+            throws RemoteException;
 
     // Barrels ativos (nome -> referência remota), usados pelos Downloaders no multicast
     HashMap<String, BarrelInterface> getBarrels() throws RemoteException;

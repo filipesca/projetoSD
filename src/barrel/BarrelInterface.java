@@ -5,12 +5,14 @@ import common.SearchResult;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.util.HashMap;
 import java.util.List;
 
 /*
     Interface remota do Index Storage Barrel.
     - deliver é chamado pelos Downloaders através do reliable multicast.
     - search, getBacklinks e os tamanhos são chamados pela Gateway (passo 5).
+    - getSnapshot e getLastSeqs são chamados pelos outros Barrels para se sincronizarem (passo 7).
 */
 
 public interface BarrelInterface extends Remote {
@@ -33,4 +35,12 @@ public interface BarrelInterface extends Remote {
 
     // Número de páginas indexadas
     int getPageCount() throws RemoteException;
+
+    // Cópia completa do índice (serializada), pedida por outro Barrel para se sincronizar
+    // (Barrel novo, reiniciado depois de um crash, ou que esteve fora da lista da Gateway)
+    byte[] getSnapshot() throws RemoteException;
+
+    // Último número de sequência entregue de cada Downloader (senderId -> seq). Os outros Barrels
+    // comparam-no com o seu para detetarem mensagens que não receberam.
+    HashMap<String, Long> getLastSeqs() throws RemoteException;
 }

@@ -46,18 +46,27 @@ public class Gateway implements GatewayInterface {
     // suspect = falhou um pedido desde o último heartbeat: deixa de receber pesquisas e não conta
     // como ativo nas estatísticas, mas continua na lista dos Downloaders (que guardam as mensagens
     // para ele) até a lease expirar. Se estiver vivo, o próximo heartbeat cria um registo novo.
+    // ready = false enquanto o Barrel se sincroniza ao arrancar (índice ainda incompleto): tal como
+    // um suspeito, não recebe pesquisas nem conta como ativo, mas recebe as mensagens dos Downloaders.
     private static class BarrelEntry {
         final BarrelInterface stub;
         final long lastHeartbeat;
         final int pages;
         final int words;
+        final boolean ready;
         volatile boolean suspect = false;
 
-        BarrelEntry(BarrelInterface stub, long lastHeartbeat, int pages, int words) {
+        BarrelEntry(BarrelInterface stub, long lastHeartbeat, int pages, int words, boolean ready) {
             this.stub = stub;
             this.lastHeartbeat = lastHeartbeat;
             this.pages = pages;
             this.words = words;
+            this.ready = ready;
+        }
+
+        // Pode responder a pesquisas e aparece nas estatísticas
+        boolean available() {
+            return ready && !suspect;
         }
     }
 
@@ -139,16 +148,21 @@ public class Gateway implements GatewayInterface {
     // ------------------------------------------------------------------ Barrels
 
     @Override
-    public void registerBarrel(String name, BarrelInterface barrel, int pages, int words) {
-        BarrelEntry old = barrels.put(name, new BarrelEntry(barrel, System.currentTimeMillis(), pages, words));
+    public boolean registerBarrel(String name, BarrelInterface barrel, int pages, int words, boolean ready) {
+        BarrelEntry old = barrels.put(name, new BarrelEntry(barrel, System.currentTimeMillis(), pages, words, ready));
         // Só mostra a mensagem quando o Barrel é novo ou reiniciou (nova referência remota)
         if (old == null || !old.stub.equals(barrel)) {
-            System.out.println("Barrel " + name + " registered (" + barrels.size() + " active).");
+            System.out.println("Barrel " + name + " registered" + (ready ? "" : " (synchronizing)")
+                    + " (" + barrels.size() + " registered).");
+        } else if (ready && !old.ready) {
+            System.out.println("Barrel " + name + " synchronized: now answering searches.");
         }
-        // Barrel novo, de novo disponível, ou índice com outro tamanho: as estatísticas mudaram
-        if (old == null || old.suspect || old.pages != pages || old.words != words) {
+        // Barrel novo, de novo disponível, pronto, ou índice com outro tamanho: as estatísticas mudaram
+        if (old == null || old.suspect || old.ready != ready || old.pages != pages || old.words != words) {
             statsChanged();
         }
+        // Registo novo (Barrel desconhecido, ou retirado por a lease ter expirado)
+        return old == null;
     }
 
     @Override
@@ -224,11 +238,11 @@ public class Gateway implements GatewayInterface {
         return order;
     }
 
-    // Barrels que podem responder a pedidos (registados e não suspeitos), por nome
+    // Barrels que podem responder a pedidos (registados, sincronizados e não suspeitos), por nome
     private List<String> availableBarrels() {
         List<String> names = new ArrayList<>();
         for (Map.Entry<String, BarrelEntry> e : barrels.entrySet()) {
-            if (!e.getValue().suspect) {
+            if (e.getValue().available()) {
                 names.add(e.getKey());
             }
         }
@@ -241,7 +255,7 @@ public class Gateway implements GatewayInterface {
     private <T> T callBarrels(String what, BarrelCall<T> request, boolean measure) throws NoBarrelAvailableException {
         for (String name : chooseBarrels()) {
             BarrelEntry entry = barrels.get(name);
-            if (entry == null || entry.suspect) {
+            if (entry == null || !entry.available()) {
                 continue;
             }
             long start = System.nanoTime();
@@ -356,11 +370,11 @@ public class Gateway implements GatewayInterface {
                 .limit(10)
                 .forEach(e -> top.add(new Stats.SearchCount(e.getKey(), e.getValue())));
 
-        // Barrels ativos (por nome, sem os suspeitos), com o tamanho do índice e o tempo médio em décimas de segundo
+        // Barrels ativos (por nome, sem os suspeitos nem os que se estão a sincronizar), com o tamanho do índice e o tempo médio em décimas de segundo
         List<Stats.BarrelStats> active = new ArrayList<>();
         availableBarrels().forEach(name -> {
             BarrelEntry entry = barrels.get(name);
-            if (entry != null && !entry.suspect) {
+            if (entry != null && entry.available()) {
                 Performance p = performance.getOrDefault(name, new Performance());
                 double tenths = Math.round(p.avgMillis() / 100.0 * 100) / 100.0; // 1 décima = 100 ms (2 casas)
                 active.add(new Stats.BarrelStats(name, entry.pages, entry.words, p.searches(), tenths));
