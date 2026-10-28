@@ -11,7 +11,7 @@ import java.util.List;
 
 /*
     Interface remota da Gateway: única porta de entrada dos clientes.
-    - Clientes: indexUrl, search, getBacklinks, getStats e subscrição das estatísticas (callback).
+    - Clientes: indexUrl, search, getBacklinks, getStats, subscrição das estatísticas (callback) e ping.
     - Barrels: registerBarrel (heartbeat). Downloaders: getBarrels (lista para o multicast).
     A Gateway não guarda dados do índice: responde aos clientes através dos Barrels.
 */
@@ -54,4 +54,8 @@ public interface GatewayInterface extends Remote {
     void subscribeStats(StatsListener listener) throws RemoteException;
 
     void unsubscribeStats(StatsListener listener) throws RemoteException;
+
+    // Usado pelos clientes no ecrã de estatísticas para detetar que a Gateway avariou ou reiniciou
+    // (nesse caso a subscrição perdeu-se e o cliente subscreve de novo). Não devolve estatísticas.
+    void ping() throws RemoteException;
 }

@@ -42,7 +42,7 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
    └───────────▲───────────┘
                │ RMI (+ callback das estatísticas)
           ┌────┴───┐
-          │ Client │   (passo 6)
+          │ Client │   menu de consola; failover para a Gateway; StatsListener (callback)
           └────────┘
 ```
 
@@ -56,7 +56,7 @@ Um motor de pesquisa Web distribuído (enunciado `sd_projeto_meta1_2027.pdf`):
 | Barrel | `barrel` | ✅ Passo 3 |
 | Reliable multicast | `downloader.ReliableMulticast` / `Barrel.deliver` | ✅ Passo 4 |
 | Gateway | `gateway` | ✅ Passo 4 (registo de Barrels) e Passo 5 (pesquisa, balanceamento, failover, indexação, estatísticas) |
-| Client | `client` | ⏳ Passo 6 |
+| Client | `client` | ✅ Passo 6 |
 | Sincronização de Barrels | `barrel` | ⏳ Passo 7 |
 
 ### Decisão: onde se registam os Barrels?
@@ -292,7 +292,7 @@ pela sincronização entre Barrels do Passo 7.
 |---|---|
 | Barrels | `registerBarrel(nome, stub, páginas, palavras)` (heartbeat) |
 | Downloaders | `getBarrels()` (lista para o multicast) |
-| Clientes | `indexUrl(url)`, `search(query, page)`, `getBacklinks(url)`, `getStats()`, `subscribeStats(listener)`, `unsubscribeStats(listener)` |
+| Clientes | `indexUrl(url)`, `search(query, page)`, `getBacklinks(url)`, `getStats()`, `subscribeStats(listener)`, `unsubscribeStats(listener)`, `ping()` (passo 6) |
 
 A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Barrels.
 
@@ -343,10 +343,47 @@ A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Ba
   (`equals` do record). Sem alterações não há envios, mesmo com heartbeats a chegar.
 - Os envios são feitos por uma thread própria (`notifier`), para que um cliente lento não atrase as
   pesquisas. Cliente que já não responde (`RemoteException`) é retirado da lista.
+- `subscribeStats` é idempotente (`addIfAbsent`, passo 6): um cliente que volta a subscrever depois de
+  uma falha de rede passageira não recebe as atualizações a dobrar.
 - A lista de clientes é uma `CopyOnWriteArrayList` (t04): é percorrida nos envios enquanto outros
   clientes se subscrevem.
 
 - Erros previsíveis no arranque (porto ocupado, configuração) dão `Error: ...`, como nos restantes programas.
+
+### 3.10 `client.Client` (Passo 6)
+O enunciado pede um cliente com uma UI simples que **só invoca métodos remotos** da Gateway: o Client
+não fala com mais nenhum componente.
+
+**Menu de consola:** `1` indexar URL (mostra o `IndexResult`), `2` pesquisar, `3` páginas com ligação
+para um URL, `4` estatísticas em tempo real, `0` sair. Na pesquisa, cada resultado mostra título, URL
+completo, citação e número de ligações recebidas, **de 10 em 10**: `s` seguinte, `a` anterior,
+`l N` backlinks do resultado N, `m` menu. Uma página com menos de 10 resultados é a última.
+
+**Failover (enunciado 5.1: "em caso de avaria devem reiniciar e fazer retry"):**
+- Todos os pedidos passam por `call(pedido)`. Com `RemoteException` (ou Gateway ainda não registada),
+  o Client volta a procurar a Gateway no registry e **repete o mesmo pedido** a cada `client.retry.ms`,
+  até `client.retry.attempts` tentativas (decisão do grupo: limitado e configurável). Depois avisa
+  "A Gateway não respondeu..." e volta ao menu: nenhuma operação fica a meio sem o utilizador saber.
+- Uma referência antiga que falha (Gateway reiniciada) é trocada logo, sem esperar nem contar como
+  tentativa: o utilizador não nota o reinício se a nova Gateway já estiver ativa.
+- `NoBarrelAvailableException` não é repetida: a Gateway responde, só não há Barrels; mostra a mensagem.
+- **At-most-once (t05):** uma `RemoteException` não diz se o pedido chegou a ser executado. Se o
+  primeiro `indexUrl` pôs o URL na fila e só a resposta se perdeu, a repetição devolve `ALREADY_KNOWN`;
+  por isso, se houve uma falha, o Client mostra "Pedido aceite" em vez de "já indexado". Repetir é
+  seguro porque `indexUrl`, `search` e `getBacklinks` são idempotentes.
+
+**Estatísticas em tempo real (callback):**
+- O Client implementa `StatsListener` e exporta-se (`UnicastRemoteObject.exportObject`), por isso
+  precisa de `rmi.hostname.local` correto na máquina #2 (a Gateway liga-se de volta ao Client).
+- Opção 4 (decisão do grupo: ecrã próprio até Enter): `subscribeStats(stub)`. A Gateway envia logo as
+  atuais e depois só quando mudam; Enter faz `unsubscribeStats` e volta ao menu.
+- **Gateway reiniciada:** a subscrição perde-se com ela e não chegaria mais nenhum callback. Uma thread
+  faz `ping()` à Gateway a cada `client.retry.ms` (decisão do grupo). Se falhar, procura a nova
+  Gateway e **subscreve-se de novo**. O ping não traz estatísticas, por isso continua a não haver
+  refrescamento periódico.
+- As subscrições sob o lock do Client e a verificação de `showingStats` em `statsUpdated` evitam que
+  uma atualização atrasada apareça depois de sair do ecrã.
+- Ao sair (`0` ou fim da entrada), faz `unexportObject` e `System.exit(0)` (termina as threads do RMI).
 
 ---
 
@@ -355,7 +392,7 @@ A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Ba
 | Conceito | Onde |
 |---|---|
 | Interface `Remote`, métodos com `throws RemoteException` (t06) | `URLQueueInterface`, `DownloaderInterface`, `BarrelInterface` |
-| `UnicastRemoteObject.exportObject` e stubs (t06) | Queue, Downloader, Barrel |
+| `UnicastRemoteObject.exportObject` e stubs (t06) | Queue, Downloader, Barrel, Gateway, Client (para o callback) |
 | RMI registry: `createRegistry`, `rebind`, `lookup` (t06) | Queue cria; Downloader faz `lookup` |
 | Passagem por valor (`Serializable`) vs por referência (`Remote`) (t06) | `PageData`/`SearchResult` por valor; stubs dos Downloaders e Barrels por referência |
 | **Callbacks** (t06) | A fila chama `download(url)` no Downloader; a Gateway chama `statsUpdated(stats)` nos clientes |
@@ -374,19 +411,19 @@ A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Ba
 
 | Requisito | Pts | Estado | Como |
 |---|---|---|---|
-| Indexar novo URL introduzido pelo utilizador | 8 | 🟡 | `Gateway.indexUrl` → `addUrlPriority` (início da fila; pendente se a fila estiver em baixo); falta o Client |
+| Indexar novo URL introduzido pelo utilizador | 8 | ✅ | Client opção 1 → `Gateway.indexUrl` → `addUrlPriority` (início da fila; pendente se a fila estiver em baixo) |
 | Indexar iterativa/recursivamente | 8 | ✅ | Downloader devolve links à fila |
-| Pesquisar páginas com um conjunto de palavras | 8 | 🟡 | `Gateway.search` → `Barrel.search` (AND); falta o Client |
-| Ordenar por ligações recebidas | 8 | 🟡 | `Barrel.search`; falta o Client |
-| Páginas com ligação para uma página | 8 | 🟡 | `Gateway.getBacklinks`; falta o Client |
-| Estatísticas em tempo real | 8 | 🟡 | `Stats` + callback `StatsListener`, enviadas só quando mudam; falta o Client |
-| Resultados de 10 em 10 | 8 | 🟡 | `PAGE_SIZE = 10`, página pedida à Gateway; falta o Client |
+| Pesquisar páginas com um conjunto de palavras | 8 | ✅ | Client opção 2 → `Gateway.search` → `Barrel.search` (AND) |
+| Ordenar por ligações recebidas | 8 | ✅ | `Barrel.search`; o Client mostra o número de ligações de cada resultado |
+| Páginas com ligação para uma página | 8 | ✅ | Client opção 3, ou `l N` num resultado → `Gateway.getBacklinks` |
+| Estatísticas em tempo real | 8 | ✅ | Client opção 4: `StatsListener` (callback), atualizações só quando mudam |
+| Resultados de 10 em 10 | 8 | ✅ | `PAGE_SIZE = 10`; Client com `s` seguinte / `a` anterior |
 | Barrels com informação idêntica (reliable multicast) | 5 | ✅ | `ReliableMulticast` + `Barrel.deliver`; testado com um Barrel morto e reiniciado |
 | Funciona com ≥1 Barrel + Gateway | 5 | ✅ | Indexação e pesquisa continuam só com 1 Barrel (testado com B2 em baixo) |
 | Barrels recuperam o estado depois de um crash | 5 | 🟡 | Persistência em ficheiro; o Passo 7 cobre o que falta |
 | Balanceamento de carga nas pesquisas | 5 | ✅ | Por desempenho: probabilidade proporcional a 1/tempo médio |
 | Downloaders em paralelo | 5 | ✅ | Vários processos + fila com downloaders livres |
-| Gateway recupera de avarias internas | 5 | ✅ | Failover entre Barrels, URLs pendentes com a fila em baixo, Barrels voltam a registar-se se a Gateway reiniciar |
+| Gateway recupera de avarias internas | 5 | 🟡 | Failover entre Barrels, URLs pendentes com a fila em baixo, Barrels voltam a registar-se e o Client repete o pedido e volta a subscrever as estatísticas se a Gateway reiniciar; falta gravar o estado da Gateway (limitação 7) |
 | Cada URL indexado por um só Downloader | 5 | ✅ | Conjunto `seen` atómico + URLs normalizados |
 | `.properties` sem recompilar | obrig. | ✅ | `Config` |
 | Corre em várias máquinas | obrig. | ✅ | `rmi.host` + `java.rmi.server.hostname` |
@@ -413,6 +450,12 @@ A Gateway **não guarda dados do índice**: responde aos clientes pedindo aos Ba
    URL. Melhoria possível: só repetir erros temporários (timeout, falha de ligação, 5xx).
 6. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
    durante cada gravação. Melhoria possível: copiar o índice sob o lock e gravar fora dele.
+7. **O estado da Gateway está em memória:** se a Gateway morrer, perde os URLs pendentes
+   (`pendingUrls`, pedidos feitos com a fila em baixo) e o top 10 das pesquisas. *Correção planeada:*
+   gravar esse estado em ficheiro, como o Barrel.
+8. **Fila em baixo no fim de um download:** se `addUrls` falhar depois de a página ter sido enviada
+   aos Barrels, os links dessa página perdem-se (e o URL é tratado como falhado). *Correção planeada:*
+   repetir `addUrls` depois de voltar a ligar-se à fila.
 
 ---
 
@@ -529,6 +572,14 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 41 | Sistema: estatísticas por callback (top 10, tamanhos, tempo médio), pesquisas distribuídas pelos dois Barrels; sem alterações não há envios | PASS |
 | 42 | Sistema: B2 em baixo → pesquisas continuam (failover), B2 deixa de contar como ativo; volta depois de reiniciar | PASS |
 | 43 | Sistema: URL pedido com a fila em baixo fica pendente, é reenviado e indexado quando a fila volta | PASS |
+| 44 | Gateway: subscrever duas vezes não duplica as atualizações das estatísticas | PASS |
+| 45 | Client: pesquisa de 10 em 10 com seguinte/anterior, fim dos resultados, backlinks do resultado N; pesquisa sem resultados | PASS |
+| 46 | Client: com a Gateway em baixo repete o mesmo pedido e conclui-o quando ela arranca | PASS |
+| 47 | Client: desiste ao fim de N tentativas, avisa e volta ao menu | PASS |
+| 48 | Client: indexação com a resposta perdida é repetida e indicada como aceite | PASS |
+| 49 | Client: estatísticas por callback; Gateway reiniciada é detetada (ping) e o Client volta a subscrever | PASS |
+| 50 | Sistema: Client real (processo, stdin) pesquisa com navegação, backlinks e indexação pela Gateway | PASS |
+| 51 | Sistema: Gateway reiniciada com o Client no ecrã de estatísticas → volta a subscrever, continua a pesquisar e sai sem erros | PASS |
 
 ---
 
@@ -543,4 +594,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | — | README e este resumo | `c4cca52` |
 | — | Revisão dos passos 1-3: palavras do título, URLs prioritários, normalização, erros claros, reconexão à fila | `0d4b624` |
 | 4 | Reliable multicast + Gateway mínima (registo dos Barrels com heartbeat/lease) | `112375f` |
-| 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `passo5-gateway` |
+| 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `e8020cb` |
+| 6 | Client: menu de consola, 10 em 10 com navegação, failover (repete o pedido), estatísticas por callback com nova subscrição se a Gateway reiniciar | `passo6-client` |

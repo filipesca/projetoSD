@@ -15,7 +15,7 @@ uma Gateway RMI serve de única porta de entrada para os clientes.
 | `barrel.Barrel`: índice invertido persistente | ✅ |
 | Reliable multicast Downloader → Barrels | ✅ |
 | `gateway.Gateway`: pesquisa, backlinks, indexação, estatísticas, balanceamento e failover | ✅ |
-| `client.Client` | ⏳ |
+| `client.Client`: UI de consola com failover e estatísticas em tempo real | ✅ |
 
 ## Requisitos
 
@@ -32,6 +32,7 @@ src/queue/               URLQueue + interface remota
 src/downloader/          Downloader + interface remota (callback) + ReliableMulticast
 src/barrel/              Barrel + interface remota
 src/gateway/             Gateway + interface remota + StatsListener (callback das estatísticas)
+src/client/              Client (UI de consola; recebe as estatísticas por callback)
 ```
 
 ## Compilar
@@ -72,6 +73,14 @@ Ordem recomendada (os programas toleram outra ordem: esperam pelos que ainda nã
    ```
    java -cp "out;lib\jsoup-1.23.2.jar" downloader.Downloader
    ```
+5. **Cliente** (um ou mais; menu de consola)
+   ```
+   java -cp "out;lib\jsoup-1.23.2.jar" client.Client
+   ```
+
+No cliente: `1` indexar um URL, `2` pesquisar (resultados de 10 em 10: `s` seguinte, `a` anterior,
+`l N` páginas com ligação para o resultado N, `m` menu), `3` páginas com ligação para um URL,
+`4` estatísticas em tempo real (atualizadas só quando mudam; Enter volta ao menu), `0` sair.
 
 Todos os programas aceitam, como último argumento, o caminho de outro ficheiro de configuração
 (por omissão usam `googol.properties` da pasta atual). Para terminar: `Ctrl+C`.
@@ -80,6 +89,8 @@ Os Downloaders podem arrancar antes da fila: esperam por ela ("URLQueue not avai
 retrying"). Se a fila for reiniciada, os Downloaders detetam a falha e voltam a ligar-se sozinhos.
 Sem nenhum Barrel ativo, os Downloaders esperam antes de enviar páginas ("No active Barrels").
 Os Barrels voltam a registar-se sozinhos se a Gateway reiniciar.
+Se a Gateway falhar, o Cliente repete o pedido (até `client.retry.attempts` vezes) e, no ecrã
+de estatísticas, volta a subscrevê-las sozinho quando a Gateway reiniciar.
 Erros de configuração (ficheiro inexistente, valor inválido, porto ocupado) aparecem como uma
 linha `Error: ...`.
 
@@ -101,12 +112,14 @@ linha `Error: ...`.
 | `barrel.data.dir` | Pasta onde os Barrels guardam o índice |
 | `barrel.save.interval.ms` | Intervalo entre gravações do índice em disco |
 | `barrel.heartbeat.ms` | Intervalo entre heartbeats (registos) de cada Barrel na Gateway |
+| `client.retry.ms` | Cliente: intervalo entre tentativas quando a Gateway não responde (e entre verificações da Gateway no ecrã de estatísticas) |
+| `client.retry.attempts` | Cliente: tentativas de um pedido antes de desistir e voltar ao menu |
 
 ## Execução em duas máquinas
 
 | | Máquina #1 | Máquina #2 |
 |---|---|---|
-| Programas | Gateway, URLQueue, Downloader, Barrel | Downloader, Barrel |
+| Programas | Gateway, URLQueue, Downloader, Barrel | Downloader, Barrel, Client |
 | `rmi.host` | IP da #1 | IP da #1 |
 | `gateway.host` | IP da #1 | IP da #1 |
 | `rmi.hostname.local` | IP da #1 | IP da #2 |
