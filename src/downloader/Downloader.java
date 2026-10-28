@@ -1,5 +1,6 @@
 package downloader;
 
+import common.Config;
 import queue.URLQueueInterface;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -15,8 +16,12 @@ public class Downloader implements DownloaderInterface {
     // Fila de URLs
     private URLQueueInterface queue;
 
-    public Downloader(URLQueueInterface queue) {
+    // Pausa entre pedidos (milissegundos)
+    private final long delayMs;
+
+    public Downloader(URLQueueInterface queue, long delayMs) {
         this.queue = queue;
+        this.delayMs = delayMs;
     }
 
     @Override
@@ -38,7 +43,7 @@ public class Downloader implements DownloaderInterface {
 
                     if (!foundUrl.isEmpty()) {
                         // Para não sobrecarregar os servidores
-                        Thread.sleep(1000);
+                        Thread.sleep(delayMs);
 
                         // Adiciona o novo URL descoberto de volta à fila para indexação recursiva
                         queue.addUrl(foundUrl);
@@ -60,12 +65,16 @@ public class Downloader implements DownloaderInterface {
 
     public static void main(String[] args) {
         try {
-            // Liga ao registry do RMI e procura o objeto da fila
-            Registry registry = LocateRegistry.getRegistry("localhost", 1099);
-            URLQueueInterface queue = (URLQueueInterface) registry.lookup("URLQueueInterface");
+            // Lê a configuração e define o IP desta máquina para o RMI (callbacks)
+            Config config = Config.load(args);
+            config.applyLocalHostname();
 
-            // Cria o downloader and exporta-o como um objeto remoto
-            Downloader downloader = new Downloader(queue);
+            // Liga ao registry do RMI e procura o objeto da fila
+            Registry registry = LocateRegistry.getRegistry(config.getRmiHost(), config.getRmiPort());
+            URLQueueInterface queue = (URLQueueInterface) registry.lookup(config.get("queue.name"));
+
+            // Cria o downloader e exporta-o como um objeto remoto
+            Downloader downloader = new Downloader(queue, config.getInt("downloader.delay.ms"));
             DownloaderInterface stub = (DownloaderInterface) UnicastRemoteObject.exportObject(downloader, 0);
 
             // Regista o stub (objeto remoto) no servidor

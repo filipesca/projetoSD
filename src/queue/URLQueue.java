@@ -1,11 +1,13 @@
 package queue;
 
+import common.Config;
 import downloader.DownloaderInterface;
 
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Queue;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -17,11 +19,9 @@ public class URLQueue implements URLQueueInterface {
     // Downloader que vai processar os URLs
     private DownloaderInterface downloader;
 
-    public URLQueue() {
-        // URLs iniciais
-        urls.add("https://uc.pt");
-        urls.add("https://openai.com");
-        urls.add("https://wikipedia.org");
+    public URLQueue(List<String> seeds) {
+        // URLs iniciais (lidos do ficheiro de configuração)
+        urls.addAll(seeds);
 
         // Temporizador: 10 segundos
         Timer timer = new Timer(true);
@@ -68,13 +68,17 @@ public class URLQueue implements URLQueueInterface {
 
     public static void main(String[] args) {
         try {
+            // Lê a configuração e define o IP desta máquina para o RMI
+            Config config = Config.load(args);
+            config.applyLocalHostname();
+
             // Cria o servidor e exporta-o como um objeto remoto
-            URLQueue server = new URLQueue();
+            URLQueue server = new URLQueue(config.getList("queue.seeds"));
             URLQueueInterface stub = (URLQueueInterface) UnicastRemoteObject.exportObject(server, 0);
 
             // Cria um RMI registry no porto e regista o stub (objeto remoto)
-            Registry registry = LocateRegistry.createRegistry(1099);
-            registry.rebind("URLQueueInterface", stub);
+            Registry registry = LocateRegistry.createRegistry(config.getRmiPort());
+            registry.rebind(config.get("queue.name"), stub);
 
             System.out.println("URLQueue RMI Server ready.");
         } catch (Exception e) {

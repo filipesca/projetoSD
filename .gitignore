@@ -1,0 +1,20 @@
+# Ficheiros compilados
+*.class
+bin/
+out/
+build/
+
+# Dados gerados pelos Barrels (índice persistente) e logs
+data/
+*.ser
+*.log
+
+# IDEs (mantém-se apenas a configuração partilhada do VS Code)
+.vscode/*
+!.vscode/settings.json
+.idea/
+*.iml
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
