@@ -2,6 +2,7 @@ package downloader;
 
 import common.Config;
 import common.PageData;
+import common.Tokenizer;
 import queue.URLQueueInterface;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -87,12 +88,7 @@ public class Downloader implements DownloaderInterface {
         String snippet = text.length() > SNIPPET_LENGTH ? text.substring(0, SNIPPET_LENGTH) + "..." : text;
 
         // Palavras: texto em minúsculas, separado por tudo o que não é letra ou dígito
-        HashSet<String> words = new HashSet<>();
-        for (String word : text.toLowerCase().split("[^\\p{L}\\p{N}]+")) {
-            if (!word.isEmpty()) {
-                words.add(word);
-            }
-        }
+        HashSet<String> words = Tokenizer.words(text);
 
         // Links: só http/https, sem a parte "#..." (é a mesma página)
         HashSet<String> links = new HashSet<>();
