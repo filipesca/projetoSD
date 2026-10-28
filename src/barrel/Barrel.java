@@ -1,9 +1,11 @@
 package barrel;
 
 import common.Config;
+import common.IndexMessage;
 import common.PageData;
 import common.SearchResult;
 import common.Tokenizer;
+import gateway.GatewayInterface;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -14,6 +16,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -29,6 +32,7 @@ import java.util.concurrent.TimeUnit;
     Index Storage Barrel: guarda o índice invertido e responde às pesquisas.
     - Todos os métodos que leem ou alteram o índice são synchronized, porque o RMI
       executa cada chamada remota numa thread diferente (Downloaders e Gateway em paralelo).
+    - Recebe as páginas dos Downloaders por reliable multicast (deliver), descartando repetidas.
     - O índice é guardado num ficheiro de objetos (data/<nome>.ser) periodicamente e ao
       terminar, e é carregado ao arrancar: assim o Barrel recupera o estado depois de um crash.
 */
@@ -49,6 +53,10 @@ public class Barrel implements BarrelInterface {
 
         // URL -> URLs das páginas que têm ligação para ele (usado na ordenação e nos backlinks)
         final HashMap<String, HashSet<String>> backlinks = new HashMap<>();
+
+        // Reliable multicast: último número de sequência entregue de cada Downloader (senderId -> seq).
+        // É gravado com o índice para que as mensagens repetidas continuem a ser filtradas depois de reiniciar.
+        HashMap<String, Long> lastSeq = new HashMap<>();
     }
 
     private final String name;
@@ -58,6 +66,9 @@ public class Barrel implements BarrelInterface {
     // true quando há alterações ainda não gravadas em ficheiro
     private boolean dirty = false;
 
+    // Referência remota (stub) deste Barrel, enviada à Gateway no registo
+    private BarrelInterface self;
+
     public Barrel(String name, Path dataDir) throws IOException {
         this.name = name;
         Files.createDirectories(dataDir);
@@ -66,6 +77,19 @@ public class Barrel implements BarrelInterface {
     }
 
     @Override
+    public synchronized void deliver(IndexMessage message) {
+        // Filtro de duplicados: o Downloader envia por ordem e só avança depois do ACK, por isso
+        // um seq menor ou igual ao último entregue é uma retransmissão já recebida
+        Long last = data.lastSeq.get(message.getSenderId());
+        if (last != null && message.getSeq() <= last) {
+            return;
+        }
+        storePage(message.getPage());
+        data.lastSeq.put(message.getSenderId(), message.getSeq());
+    }
+
+    // Guarda no índice a informação de uma página (idempotente: guardar duas vezes não altera nada).
+    // Público para os testes; remotamente as páginas chegam por deliver().
     public synchronized void storePage(PageData page) {
         String url = page.getUrl();
         data.pages.put(url, new String[]{page.getTitle(), page.getSnippet()});
@@ -170,6 +194,10 @@ public class Barrel implements BarrelInterface {
         }
         try (ObjectInputStream in = new ObjectInputStream(Files.newInputStream(dataFile))) {
             IndexData loaded = (IndexData) in.readObject();
+            // Ficheiros gravados antes do passo 4 não têm lastSeq
+            if (loaded.lastSeq == null) {
+                loaded.lastSeq = new HashMap<>();
+            }
             System.out.println("Index loaded from " + dataFile + ": " + loaded.pages.size() + " pages, "
                     + loaded.index.size() + " words");
             return loaded;
@@ -193,6 +221,40 @@ public class Barrel implements BarrelInterface {
         return name;
     }
 
+    // Heartbeat: regista-se na Gateway e renova o registo periodicamente. Se a Gateway estiver
+    // desligada ou reiniciar, continua a tentar e volta a aparecer na lista sem ser reiniciado.
+    private void gatewayHeartbeatLoop(String host, int port, String gatewayName, long intervalMs) {
+        GatewayInterface gateway = null;
+        boolean connected = false; // o último registo foi bem sucedido
+        boolean warned = false;    // já avisou que a Gateway não está disponível (evita repetir a mensagem)
+        while (true) {
+            try {
+                if (gateway == null) {
+                    gateway = (GatewayInterface) LocateRegistry.getRegistry(host, port).lookup(gatewayName);
+                }
+                gateway.registerBarrel(name, self);
+                if (!connected) {
+                    System.out.println("Registered in Gateway at " + host + ":" + port + ".");
+                    connected = true;
+                    warned = false;
+                }
+            } catch (Exception e) {
+                gateway = null; // na próxima tentativa volta a procurar a Gateway no registry
+                if (!warned) {
+                    System.out.println((connected ? "Lost connection to Gateway" : "Gateway not available at "
+                            + host + ":" + port) + ", retrying every " + intervalMs + " ms.");
+                    warned = true;
+                }
+                connected = false;
+            }
+            try {
+                Thread.sleep(intervalMs);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+    }
+
     // Arranque: java barrel.Barrel <nome> [ficheiro.properties]
     public static void main(String[] args) {
         if (args.length < 1) {
@@ -206,16 +268,25 @@ public class Barrel implements BarrelInterface {
             Config config = Config.load(args.length > 1 ? args[1] : Config.DEFAULT_FILE);
             config.applyLocalHostname();
 
-            // Carrega o índice guardado (recuperação depois de um crash) e ativa a gravação periódica
+            // Lê toda a configuração antes de arrancar (um valor inválido termina logo com mensagem clara)
             dataDir = Paths.get(config.get("barrel.data.dir"));
+            int saveIntervalMs = config.getInt("barrel.save.interval.ms");
+            int heartbeatMs = config.getInt("barrel.heartbeat.ms");
+            String gatewayHost = config.get("gateway.host");
+            int gatewayPort = config.getInt("gateway.port");
+            String gatewayName = config.get("gateway.name");
+
+            // Carrega o índice guardado (recuperação depois de um crash) e ativa a gravação periódica
             Barrel barrel = new Barrel(name, dataDir);
-            barrel.startAutoSave(config.getInt("barrel.save.interval.ms"));
+            barrel.startAutoSave(saveIntervalMs);
 
             // Ao terminar normalmente (ex.: Ctrl+C) grava o que ainda faltar
             Runtime.getRuntime().addShutdownHook(new Thread(barrel::save));
 
-            // Exporta o Barrel como objeto remoto (o registo na Gateway é feito no passo 5)
-            UnicastRemoteObject.exportObject(barrel, 0);
+            // Exporta o Barrel como objeto remoto e regista-se na Gateway (com heartbeat periódico)
+            barrel.self = (BarrelInterface) UnicastRemoteObject.exportObject(barrel, 0);
+            new Thread(() -> barrel.gatewayHeartbeatLoop(gatewayHost, gatewayPort, gatewayName, heartbeatMs),
+                    "gateway-heartbeat").start();
 
             System.out.println("Barrel " + name + " ready: " + barrel.getPageCount() + " pages, "
                     + barrel.getWordCount() + " words.");
