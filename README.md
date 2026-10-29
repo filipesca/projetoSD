@@ -15,8 +15,6 @@ O sistema é formado por cinco programas, que podem correr em máquinas diferent
 | Gateway | `gateway.Gateway` | Única porta de entrada dos clientes: distribui as pesquisas pelos Barrels e envia as estatísticas em tempo real |
 | Cliente | `client.Client` | Menu de consola para indexar URLs, pesquisar, ver ligações e estatísticas |
 
-A explicação detalhada da arquitetura, dos algoritmos e das decisões está em [RESUMO.md](RESUMO.md).
-
 ## Requisitos
 
 - **JDK 17 ou superior**, com `java` e `javac` no PATH (verificar com `java -version`).
