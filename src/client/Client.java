@@ -165,6 +165,10 @@ public class Client implements StatsListener {
                     }
                 } catch (GatewayUnavailableException | NoBarrelAvailableException e) {
                     out.println(e.getMessage());
+                } catch (RuntimeException e) {
+                    // Erro inesperado vindo da Gateway (o RMI devolve-o ao cliente): a operação falhou,
+                    // mas o cliente continua a funcionar e volta ao menu
+                    out.println("Ocorreu um erro inesperado na Gateway: a operação não foi concluída. Tente de novo.");
                 }
             }
         } finally {
