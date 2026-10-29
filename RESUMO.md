@@ -88,6 +88,13 @@ outro. Assim, cada componente pode avariar e reiniciar sem afetar os restantes.
   dos stubs que esta máquina exporta**. Sem isto, um stub criado na máquina #2 podia dizer
   "liga-me em 127.0.0.1" e a máquina #1 ligava a si própria. É essencial para os **callbacks
   entre máquinas**.
+- **Tempos limite do RMI (revisão final, `rmi.timeout.ms`):** por omissão o RMI espera **para sempre**
+  pela resposta (`sun.rmi.transport.tcp.responseTimeout = 0`) e a ligação a uma máquina desligada só
+  falha ao fim do tempo do sistema operativo (~21 s no Windows). Uma máquina que desaparece sem fechar
+  as ligações (rede desligada, VM suspensa) bloqueava a pesquisa na Gateway e o heartbeat dos Barrels,
+  sem chegar a haver `RemoteException` nem failover. `applyLocalHostname()` define agora o tempo de
+  resposta e instala uma fábrica de sockets (`TimeoutSocketFactory`) com tempo limite de ligação, em
+  todos os programas. 10 s por omissão: largo o suficiente para gravar ou copiar um índice grande.
 - Checklist: "Configuração em .properties não requer recompilação" (-5 se faltar) e
   "corre distribuído por várias máquinas" (-10).
 
@@ -172,6 +179,10 @@ faz `take()`.
   Se a fila não responder nesse momento (`sendLinks`), a página já foi para os Barrels, por isso o URL
   **não** é tratado como falhado: o Downloader volta a ligar-se à fila (`reconnect`, espera que ela
   reinicie) e repete o envio dos mesmos links até conseguir (a fila ignora os que já viu).
+- **Falhas de download (revisão final):** `isPermanent` separa erros permanentes (HTTP 4xx exceto 408/429,
+  PDF e outros tipos que não são HTML, URL inválido), que **não** voltam à fila, dos temporários (timeout,
+  ligação recusada, 5xx), que voltam com `retryUrl`. O log mostra uma descrição curta (`describeFailure`:
+  "HTTP 404", "not an HTML page (application/pdf)", "timeout") em vez do nome da exceção.
 - No `finally` faz a pausa (`downloader.delay.ms`) e chama sempre `downloaderReady`: mesmo depois de um
   erro o Downloader volta a ficar disponível (no projeto de referência do ano passado isto
   falhava e o downloader ficava parado).
@@ -405,6 +416,8 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 - Uma referência antiga que falha (Gateway reiniciada) é trocada logo, sem esperar nem contar como
   tentativa: o utilizador não nota o reinício se a nova Gateway já estiver ativa.
 - `NoBarrelAvailableException` não é repetida: a Gateway responde, só não há Barrels; mostra a mensagem.
+- Um erro inesperado vindo da Gateway (`RuntimeException`, que o RMI devolve ao cliente) é apanhado no
+  menu: o Client avisa que a operação não foi concluída e continua a funcionar (revisão final).
 - **At-most-once (t05):** uma `RemoteException` não diz se o pedido chegou a ser executado. Se o
   primeiro `indexUrl` pôs o URL na fila e só a resposta se perdeu, a repetição devolve `ALREADY_KNOWN`;
   por isso, se houve uma falha, o Client mostra "Pedido aceite" em vez de "já indexado". Repetir é
@@ -486,8 +499,9 @@ completo, citação e número de ligações recebidas, **de 10 em 10**: `s` segu
 4. **A fila de URLs está em memória:** se a URLQueue morrer, perde os URLs pendentes (o enunciado
    deixa o desenho da fila livre). Os Downloaders, esses, recuperam sozinhos: detetam a falha pelo
    `ping`, esperam que a fila volte e voltam a registar-se.
-5. **Erros permanentes também são tentados de novo** (ex.: 404, PDF): 2 tentativas inúteis por
-   URL. Melhoria possível: só repetir erros temporários (timeout, falha de ligação, 5xx).
+5. ~~Erros permanentes também são tentados de novo~~ **Resolvido na revisão final:** HTTP 4xx (exceto
+   408 e 429), conteúdo que não é HTML e URL inválido não voltam à fila; só os temporários (timeout,
+   ligação recusada, 5xx, ...) são repetidos até `queue.max.retries`.
 6. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
    durante cada gravação. Melhoria possível: copiar o índice sob o lock e gravar fora dele.
 7. ~~O estado da Gateway está em memória~~ **Resolvido:** URLs pendentes e contagens de pesquisas
@@ -638,6 +652,11 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 61 | Gateway: ficheiro de estado corrompido não impede o arranque | PASS |
 | 62 | Downloader: com a fila em baixo depois de indexar a página, guarda os links e envia-os quando ela volta | PASS |
 | 63 | Sistema: Gateway morta (`destroyForcibly`) e reiniciada recupera do ficheiro o top 10 das pesquisas | PASS |
+| 64 | Downloader: 404 e PDF são erros permanentes; 429, 503 e timeout são temporários; descrições sem nomes de exceções | PASS |
+| 65 | Client: erro inesperado da Gateway mostra uma mensagem e o Client continua a funcionar | PASS |
+| 66 | RMI: ligação a uma máquina que não responde falha ao fim do tempo limite (~0,5 s em vez de ~21 s) | PASS |
+| 67 | Sistema: 503 tentado 3 vezes e descartado; 404 e PDF tentados uma só vez; logs sem nomes de exceções | PASS |
+| 68 | Sistema: Barrel que não responde (máquina desaparecida) → a Gateway desiste ao fim de `rmi.timeout.ms` e faz failover | PASS |
 
 ---
 
@@ -655,4 +674,5 @@ Os testes automáticos ficam fora do repositório (`tests/`), mas os resultados 
 | 5 | Gateway: pesquisa com balanceamento por desempenho e failover, backlinks, indexação (com URLs pendentes), estatísticas por callback | `e8020cb` |
 | 6 | Client: menu de consola, 10 em 10 com navegação, failover (repete o pedido), estatísticas por callback com nova subscrição se a Gateway reiniciar | `164c192` |
 | 7 | Sincronização de Barrels: snapshot + união no arranque e com lease expirada, Barrel só pronto depois de sincronizado, deteção de mensagens em falta por números de sequência | `d695490` |
-| — | Limitações 7 e 8: estado da Gateway em ficheiro (URLs pendentes, top 10); Downloader não perde os links se a fila cair | `limitacoes-7-8` |
+| — | Limitações 7 e 8: estado da Gateway em ficheiro (URLs pendentes, top 10); Downloader não perde os links se a fila cair | `49be090` |
+| — | Revisão final: tempos limite do RMI, erros permanentes não repetidos e sem nomes de exceções, erro inesperado no Client, `gateway-state.ser` | `revisao-final` |

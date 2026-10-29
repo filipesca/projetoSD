@@ -2,6 +2,10 @@ package common;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.rmi.server.RMISocketFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -84,7 +88,46 @@ public class Config {
     }
 
     // Define o IP que o RMI anuncia nos stubs desta máquina (necessário para callbacks entre máquinas)
+    // e os tempos limite das chamadas remotas (ver applyRmiTimeout)
     public void applyLocalHostname() {
         System.setProperty("java.rmi.server.hostname", get("rmi.hostname.local"));
+        applyRmiTimeout(getInt("rmi.timeout.ms"));
+    }
+
+    // Tempos limite do RMI. Por omissão o RMI espera para sempre pela resposta e a ligação a uma máquina
+    // desligada só falha ao fim do tempo do sistema operativo (~21 s no Windows). Assim, uma máquina que
+    // desaparece sem fechar as ligações (rede desligada, VM suspensa) dá RemoteException ao fim de
+    // timeoutMs e o failover funciona, em vez de bloquear a pesquisa ou o heartbeat.
+    // Tem de ser chamado antes da primeira chamada remota (o RMI lê a propriedade uma só vez).
+    public static void applyRmiTimeout(int timeoutMs) {
+        // Tempo máximo à espera da resposta de uma chamada remota
+        System.setProperty("sun.rmi.transport.tcp.responseTimeout", String.valueOf(timeoutMs));
+        // Tempo máximo para estabelecer a ligação (fábrica de sockets usada por todo o RMI desta JVM)
+        try {
+            RMISocketFactory.setSocketFactory(new TimeoutSocketFactory(timeoutMs));
+        } catch (IOException e) {
+            // Já definida nesta JVM (só pode ser definida uma vez): mantém a anterior
+        }
+    }
+
+    // Fábrica de sockets do RMI com tempo limite de ligação
+    public static class TimeoutSocketFactory extends RMISocketFactory {
+        private final int timeoutMs;
+
+        public TimeoutSocketFactory(int timeoutMs) {
+            this.timeoutMs = timeoutMs;
+        }
+
+        @Override
+        public Socket createSocket(String host, int port) throws IOException {
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), timeoutMs);
+            return socket;
+        }
+
+        @Override
+        public ServerSocket createServerSocket(int port) throws IOException {
+            return new ServerSocket(port);
+        }
     }
 }

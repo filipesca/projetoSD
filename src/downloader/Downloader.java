@@ -6,10 +6,17 @@ import common.Tokenizer;
 import common.UrlNormalizer;
 import gateway.GatewayInterface;
 import queue.URLQueueInterface;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
+import org.jsoup.UnsupportedMimeTypeException;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 
+import javax.net.ssl.SSLException;
+import java.net.ConnectException;
+import java.net.MalformedURLException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.file.NoSuchFileException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
@@ -106,18 +113,65 @@ public class Downloader implements DownloaderInterface {
                 sendLinks(url, new ArrayList<>(page.getLinks()));
 
             } catch (Exception e) {
-                System.out.println("Failed to process URL: " + url + " (" + e + ")");
-                try {
-                    // A fila decide se o URL ainda pode ser tentado de novo
-                    queue.retryUrl(url);
-                } catch (Exception ex) {
-                    System.out.println("URL queue unreachable: " + reason(ex));
+                if (isPermanent(e)) {
+                    // Repetir não adianta (ex.: 404, PDF): não volta à fila
+                    System.out.println("Failed to process URL: " + url + " (" + describeFailure(e)
+                            + ", permanent error: not retried)");
+                } else {
+                    System.out.println("Failed to process URL: " + url + " (" + describeFailure(e) + ")");
+                    try {
+                        // Erro temporário: a fila decide se o URL ainda pode ser tentado de novo
+                        queue.retryUrl(url);
+                    } catch (Exception ex) {
+                        System.out.println("URL queue unreachable: " + reason(ex));
+                    }
                 }
             } finally {
                 // Avisa sempre a fila que está livre (também em caso de erro, para não ficar parado)
                 notifyReady();
             }
         }).start();
+    }
+
+    // Erro permanente num download: repetir não adianta. HTTP 4xx (exceto 408 Request Timeout e
+    // 429 Too Many Requests, que são temporários), conteúdo que não é HTML e URL inválido.
+    // Os restantes (timeout, ligação recusada, 5xx, ...) podem ser temporários e são repetidos.
+    public static boolean isPermanent(Exception e) {
+        if (e instanceof HttpStatusException http) {
+            int status = http.getStatusCode();
+            return status >= 400 && status < 500 && status != 408 && status != 429;
+        }
+        return e instanceof UnsupportedMimeTypeException || e instanceof MalformedURLException
+                || e instanceof IllegalArgumentException;
+    }
+
+    // Descrição curta de uma falha de download, para o log (sem o nome da exceção nem stack trace)
+    public static String describeFailure(Exception e) {
+        if (e instanceof HttpStatusException http) {
+            return "HTTP " + http.getStatusCode();
+        }
+        if (e instanceof UnsupportedMimeTypeException mime) {
+            return "not an HTML page (" + mime.getMimeType() + ")";
+        }
+        if (e instanceof SocketTimeoutException) {
+            return "timeout";
+        }
+        if (e instanceof UnknownHostException) {
+            return "unknown host";
+        }
+        if (e instanceof ConnectException) {
+            return "connection refused";
+        }
+        if (e instanceof SSLException) {
+            return "SSL error";
+        }
+        if (e instanceof MalformedURLException || e instanceof IllegalArgumentException) {
+            return "invalid URL";
+        }
+        if (e instanceof InterruptedException) {
+            return "interrupted";
+        }
+        return e.getMessage() != null ? e.getMessage() : "download error";
     }
 
     // Envia à fila os links encontrados numa página. Se a fila não responder, volta a ligar-se a ela

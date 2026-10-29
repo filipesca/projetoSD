@@ -101,6 +101,7 @@ linha `Error: ...`.
 |---|---|
 | `rmi.host`, `rmi.port` | Máquina e porto do RMI registry da fila (onde corre a URLQueue) |
 | `rmi.hostname.local` | IP **desta** máquina, anunciado nas referências remotas (callbacks) |
+| `rmi.timeout.ms` | Tempo máximo para ligar a outra máquina e esperar a resposta de uma chamada RMI (uma máquina desaparecida dá erro e há failover) |
 | `queue.name` | Nome da fila no registry |
 | `queue.seeds` | URLs iniciais, separados por vírgulas |
 | `queue.max.retries` | Novas tentativas para um URL cujo download falhou |
@@ -135,6 +136,6 @@ porto do registry e portos dinâmicos para os objetos exportados).
 ## Apagar os dados de teste
 
 O índice de cada Barrel fica em `data/<nome>.ser` (pasta definida em `barrel.data.dir`) e o estado
-da Gateway (URLs pendentes e top 10 de pesquisas) em `data/gateway.ser` (`gateway.data.file`).
+da Gateway (URLs pendentes e top 10 de pesquisas) em `data/gateway-state.ser` (`gateway.data.file`; nome diferente de qualquer Barrel).
 Para começar do zero, parar a Gateway e **todos** os Barrels e apagar a pasta `data/` em **todas** as máquinas
 (um Barrel que arranca copia o índice de outro Barrel ativo; se algum continuar ligado, os dados voltam).
