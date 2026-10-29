@@ -22,7 +22,6 @@ partes mais perguntadas), depois as perguntas da secção 12 e o guião da demon
 11. [Limitações conhecidas](#11-limitações-conhecidas)
 12. [Perguntas prováveis](#12-perguntas-prováveis)
 13. [Demonstração na defesa](#13-demonstração-na-defesa)
-14. [Testes](#14-testes)
 
 ---
 
