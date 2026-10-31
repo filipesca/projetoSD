@@ -107,6 +107,9 @@ Copiar o projeto compilado para as duas máquinas e ajustar o `googol.properties
 | `queue.name` | Nome da fila no registry |
 | `queue.seeds` | URLs iniciais, separados por vírgulas |
 | `queue.max.retries` | Novas tentativas para um URL cujo download falhou com um erro temporário |
+| `queue.downloader.check.ms` | Intervalo entre verificações (ping) dos Downloaders com um URL em curso; se um morrer, o URL volta à fila |
+| `queue.data.file` | Ficheiro onde a fila guarda os URLs por visitar, os já vistos e as tentativas |
+| `queue.save.interval.ms` | Intervalo entre gravações do estado da fila |
 | `gateway.host`, `gateway.port`, `gateway.name` | Máquina, porto do registry e nome da Gateway |
 | `gateway.barrel.timeout.ms` | Tempo sem heartbeat até a Gateway retirar um Barrel da lista |
 | `gateway.queue.retry.ms` | Intervalo entre tentativas de reenviar à fila os URLs pedidos enquanto ela estava em baixo |
@@ -128,7 +131,8 @@ Erros de configuração (ficheiro inexistente, valor inválido, porto ocupado) a
 
 - Cada Barrel guarda o índice em `data/<nome>.ser`.
 - A Gateway guarda o seu estado em `data/gateway-state.ser`.
+- A fila de URLs guarda o seu estado em `data/queue-state.ser`.
 
-Para começar do zero, parar a Gateway e todos os Barrels e apagar a pasta `data/` em **todas** as
+Para começar do zero, parar a Gateway, a fila e todos os Barrels e apagar a pasta `data/` em **todas** as
 máquinas. Um Barrel que arranca copia o índice de outro Barrel ativo, por isso, se algum continuar
 ligado, os dados voltam.

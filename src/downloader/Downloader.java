@@ -34,6 +34,8 @@ import java.util.List;
     Tolerância a falhas da fila: uma thread verifica periodicamente (ping) se a fila
     está ativa. Se a fila avariar ou reiniciar, o Downloader volta a procurá-la no
     registry e regista-se de novo, sem ser preciso reiniciá-lo.
+    No sentido contrário, a fila faz ping a este Downloader enquanto ele tem um URL em curso:
+    se o Downloader morrer a meio de um download, o URL volta à fila.
 
     Envio para os Barrels: cada página é enviada a todos os Barrels ativos por reliable multicast
     (ver ReliableMulticast). A lista de Barrels ativos é pedida periodicamente à Gateway.
@@ -131,6 +133,11 @@ public class Downloader implements DownloaderInterface {
                 notifyReady();
             }
         }).start();
+    }
+
+    @Override
+    public void ping() {
+        // Não faz nada: se a chamada chegar aqui, o downloader está vivo
     }
 
     // Erro permanente num download: repetir não adianta. HTTP 4xx (exceto 408 Request Timeout e

@@ -71,8 +71,11 @@ public class Barrel implements BarrelInterface {
     private final Path dataFile;
     private IndexData data;
 
-    // true quando há alterações ainda não gravadas em ficheiro
+    // true quando há alterações ainda não gravadas em ficheiro (protegido pelo lock do Barrel)
     private boolean dirty = false;
+
+    // Lock só da gravação em ficheiro (separado do lock do índice; ver save())
+    private final Object saveLock = new Object();
 
     // Referência remota (stub) deste Barrel, enviada à Gateway no registo
     private BarrelInterface self;
@@ -170,6 +173,12 @@ public class Barrel implements BarrelInterface {
     // próprio objeto, o RMI serializava-o depois de o método retornar, já sem o lock.
     @Override
     public synchronized byte[] getSnapshot() {
+        return serialize();
+    }
+
+    // Serializa o índice para memória. Só pode ser chamado com o lock do Barrel (o índice não pode
+    // mudar a meio). É usado no snapshot e na gravação em ficheiro.
+    private byte[] serialize() {
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
             out.writeObject(data);
@@ -300,24 +309,33 @@ public class Barrel implements BarrelInterface {
     }
 
     // Grava o índice em ficheiro, se houver alterações.
+    // Só a cópia para memória (rápida) é feita com o lock do Barrel; a escrita no disco (lenta) é feita
+    // fora dele, para as pesquisas e as mensagens do multicast não ficarem à espera da gravação.
     // Escreve primeiro num ficheiro temporário e depois substitui o anterior, para que um crash
     // a meio da escrita nunca deixe o ficheiro principal corrompido.
-    public synchronized void save() {
-        if (!dirty) {
-            return;
-        }
-        Path tmp = dataFile.resolveSibling(dataFile.getFileName() + ".tmp");
-        try (ObjectOutputStream out = new ObjectOutputStream(Files.newOutputStream(tmp))) {
-            out.writeObject(data);
-        } catch (IOException e) {
-            System.out.println("Could not save index: " + e.getMessage());
-            return;
-        }
-        try {
-            Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            dirty = false;
-        } catch (IOException e) {
-            System.out.println("Could not save index: " + e.getMessage());
+    // saveLock: duas gravações (a periódica e a do fim do programa) nunca escrevem ao mesmo tempo, e
+    // uma cópia mais antiga nunca substitui uma mais recente.
+    public void save() {
+        synchronized (saveLock) {
+            byte[] bytes;
+            synchronized (this) {
+                if (!dirty) {
+                    return;
+                }
+                bytes = serialize();
+                // O que mudar a partir daqui volta a pôr dirty = true e entra na próxima gravação
+                dirty = false;
+            }
+            Path tmp = dataFile.resolveSibling(dataFile.getFileName() + ".tmp");
+            try {
+                Files.write(tmp, bytes);
+                Files.move(tmp, dataFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException e) {
+                System.out.println("Could not save index: " + e.getMessage());
+                synchronized (this) {
+                    dirty = true; // tenta de novo na próxima gravação periódica
+                }
+            }
         }
     }
 
