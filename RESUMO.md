@@ -71,10 +71,10 @@ carga, Downloaders em paralelo, configuração em `.properties` e execução em 
                                             ▼        │          ▼
    ┌──────────┐   getSnapshot /   ┌──────────┐       │     ┌──────────┐
    │ Barrel 1 │◀─ getLastSeqs ──▶│ Barrel 2 │       │     │ URLQueue │  registry próprio (rmi.port)
-   └────▲─────┘  (sincronização)  └────▲─────┘       │     └─┬────▲───┘
+   └────▲─────┘  (sincronização)  └────▲─────┘       │     └─┬────▲───┘  data/queue-state.ser
         │ registerBarrel (heartbeat)   │ ────────────┘       │    │ addUrls / retryUrl /
         │                              │                     │    │ downloaderReady / ping
-        │   deliver(IndexMessage)      │          download(url) (callback)
+        │   deliver(IndexMessage)      │      download(url) (callback) / ping
         │   reliable multicast         │                     ▼    │
         └──────────────┬───────────────┘               ┌──────────┴─┐
                        └─────────────────────────────── │ Downloader │ (vários) ── getBarrels() à Gateway
@@ -94,7 +94,7 @@ carga, Downloaders em paralelo, configuração em `.properties` e execução em 
 | Downloader | `getBarrels` | Gateway | Saber para que Barrels enviar as páginas |
 | Downloader | `deliver` | Barrel | Reliable multicast das páginas |
 | Downloader | `addUrls`, `retryUrl`, `downloaderReady`, `ping` | URLQueue | Devolver links, pedir nova tentativa, avisar que está livre |
-| URLQueue | `download` (**callback**) | Downloader | Entregar um URL a um Downloader livre |
+| URLQueue | `download` (**callback**), `ping` | Downloader | Entregar um URL a um Downloader livre; verificar se um Downloader com URL em curso está vivo |
 
 ### Decisões de arquitetura
 
@@ -205,18 +205,23 @@ lado.
 
 ### 4.2 `queue.URLQueue`: fila de URLs
 
-**Estruturas** (todas de `java.util.concurrent`, porque o RMI executa cada chamada remota numa thread
-própria):
+**Estruturas** (o RMI executa cada chamada remota numa thread própria):
 
 | Estrutura | Para quê |
 |---|---|
-| `LinkedBlockingDeque<String> urls` | URLs por visitar. `take()` bloqueia enquanto estiver vazia (sem espera ativa). É uma *deque* para os URLs dos utilizadores entrarem pelo início. |
-| `LinkedBlockingQueue<DownloaderInterface> availableDownloaders` | Downloaders livres |
-| `Set<String> seen` (`ConcurrentHashMap.newKeySet()`) | URLs que já entraram na fila. `seen.add(url)` é atómico: só quem o adiciona primeiro põe o URL na fila. É isto que garante que **cada URL é indexado por um só Downloader**. |
-| `ConcurrentHashMap<String,Integer> retries` | Tentativas por URL (`merge` incrementa de forma atómica) |
+| `ArrayDeque<String> urls` | URLs por visitar. É uma *deque* para os URLs dos utilizadores (e os de Downloaders avariados) entrarem pelo início. |
+| `LinkedBlockingQueue<DownloaderInterface> availableDownloaders` | Downloaders livres (`take()` bloqueia enquanto não houver nenhum) |
+| `HashSet<String> seen` | URLs que já entraram na fila. `seen.add(url)` é feito sob o lock da fila: só quem o adiciona primeiro põe o URL na fila. É isto que garante que **cada URL é indexado por um só Downloader**. |
+| `HashMap<String,Integer> retries` | Tentativas por URL |
+| `HashMap<DownloaderInterface,String> inProgress` | URL em curso de cada Downloader ocupado (o stub serve de chave: `equals()` compara o objeto remoto) |
 
-**Dispatcher:** uma thread repete `availableDownloaders.take()` → `urls.take()` →
-`downloader.download(url)`. A última chamada é um callback: é a fila que invoca o Downloader.
+`urls`, `seen`, `retries` e `inProgress` são protegidos pelo **lock da fila** (métodos `synchronized`).
+Assim a cópia gravada em ficheiro é coerente: um URL nunca está "entre" a fila e `inProgress`.
+
+**Dispatcher:** uma thread repete `availableDownloaders.take()` → espera (`wait`) até haver um URL →
+tira-o de `urls` e põe-no em `inProgress` (uma só operação, sob o lock) → `downloader.download(url)`.
+A última chamada é um callback: é a fila que invoca o Downloader. Quando o Downloader acaba (já
+enviou os links ou pediu `retryUrl`), chama `downloaderReady` e o URL sai de `inProgress`.
 
 **URLs dos utilizadores (`addUrlPriority`):** entram pelo início (`addFirst`). Se já estavam na fila,
 passam para o início. Devolve `false` se o URL já foi (ou está a ser) visitado. Sem isto, o URL do
@@ -225,10 +230,26 @@ utilizador ficava atrás de milhares de links descobertos pelo crawler.
 **Falhas:**
 - **Download com erro temporário:** o Downloader chama `retryUrl`, e o URL volta à fila até
   `queue.max.retries` vezes. Depois é descartado, para não ficar a tentar links mortos para sempre.
-- **Downloader morto:** `download()` lança `RemoteException`. O URL volta ao **início** da fila e
-  esse Downloader não volta à lista de livres.
+- **Downloader livre morto:** `download()` lança `RemoteException`. O URL volta ao **início** da fila
+  e esse Downloader não volta à lista de livres.
+- **Downloader morto a meio de um download:** `download()` já tinha retornado, por isso a fila não
+  recebe nenhuma exceção. Uma thread (`downloader-check`) faz `ping()` a cada
+  `queue.downloader.check.ms` aos Downloaders em `inProgress`. Se o ping falhar, o URL volta ao
+  **início** da fila e vai para outro Downloader. Os pings são feitos fora do lock (podem demorar até
+  `rmi.timeout.ms`). Se a falha for só de rede, o URL é descarregado duas vezes, o que não estraga o
+  índice (os Barrels juntam conjuntos).
 - **Erro inesperado no dispatcher (`RuntimeException`):** é apanhado e o URL volta à fila. Sem isto,
   a thread morria sem aviso e a fila deixava de distribuir URLs.
+
+**Persistência (`queue.data.file`, por omissão `data/queue-state.ser`):**
+- Grava os URLs por visitar (com os de `inProgress` **à frente**: depois de reiniciar, a fila não sabe
+  se esses downloads terminaram), o conjunto `seen` e as `retries`. Periodicamente
+  (`queue.save.interval.ms`, só se houver alterações) e num shutdown hook (Ctrl+C).
+- A cópia é feita sob o lock da fila; a escrita no disco é feita fora dele (não atrasa os
+  Downloaders). Escrita atómica (`.tmp` + `ATOMIC_MOVE`), como no Barrel e na Gateway.
+- Ao arrancar carrega o ficheiro e só depois junta os `queue.seeds` (os já vistos são ignorados).
+  Ficheiro corrompido: arranca vazia.
+- Com `kill -9` perde-se o que mudou depois da última gravação (no máximo `queue.save.interval.ms`).
 
 ### 4.3 `downloader.Downloader`: web crawler
 
@@ -268,6 +289,9 @@ utilizador ficava atrás de milhares de links descobertos pelo crawler.
   não é uma falha do URL. O Downloader volta a ligar-se à fila e repete o envio dos links até
   conseguir; a fila ignora os que já viu.
 
+**Vigiado pela fila:** enquanto tem um URL em curso, a fila faz-lhe `ping()` (o método não faz nada;
+basta a chamada chegar). Se o Downloader morrer, o URL volta à fila (secção 4.2).
+
 **Lista de Barrels:** outra thread pede `getBarrels()` à Gateway a cada `downloader.reconnect.ms` e
 atualiza o multicast (secção 6).
 
@@ -303,6 +327,12 @@ as entregas dos Downloaders e as cópias para outros Barrels chegam em paralelo.
 - Grava o `IndexData` inteiro com `ObjectOutputStream` em `data/<nome>.ser`: periodicamente
   (`barrel.save.interval.ms`, só se houver alterações), depois de cada sincronização e num shutdown
   hook (Ctrl+C).
+- **Escrita fora do lock:** sob o lock do Barrel só se serializa o índice para memória (`byte[]`,
+  o mesmo código do `getSnapshot`) e se põe `dirty = false`. A escrita no disco (lenta) é feita fora
+  dele: as pesquisas e as entregas do multicast não esperam pela gravação. O que chega depois da cópia
+  volta a pôr `dirty = true` e entra na gravação seguinte. Um segundo lock (`saveLock`) impede duas
+  gravações ao mesmo tempo (a periódica e a do shutdown hook) e que uma cópia antiga substitua uma
+  mais recente. Se a escrita falhar, `dirty` volta a `true`.
 - **Escrita atómica:** escreve em `<nome>.ser.tmp` e faz `Files.move(..., ATOMIC_MOVE)`. Um crash a
   meio da escrita nunca corrompe o ficheiro principal.
 - Ao arrancar, carrega o ficheiro; se estiver corrompido, arranca vazio.
@@ -417,9 +447,10 @@ passam **por referência**; `PageData`, `SearchResult`, `Stats`, etc. passam **p
 | | `addUrl(url)` | (disponível; a fila usa-o internamente) | Acrescenta um URL ao fim |
 | | `addUrlPriority(url)` | Gateway | URL de utilizador no início; `false` se já visitado |
 | | `retryUrl(url)` | Downloader | Nova tentativa depois de um erro temporário (limitada) |
-| | `downloaderReady(stub)` | Downloader | O Downloader está livre (a fila guarda o stub para o callback) |
+| | `downloaderReady(stub)` | Downloader | O Downloader está livre (a fila guarda o stub para o callback); o URL que tinha em curso terminou |
 | | `ping()` | Downloader | Verifica se a fila está viva |
 | `DownloaderInterface` | `download(url)` | URLQueue (**callback**) | Processa o URL numa thread nova e retorna logo |
+| | `ping()` | URLQueue | Verifica se um Downloader com URL em curso continua vivo |
 | `BarrelInterface` | `deliver(IndexMessage)` | Downloader | Reliable multicast; o retorno normal é o ACK |
 | | `search(query, page)` | Gateway | Página `page` (10 resultados) das páginas com todos os termos |
 | | `getBacklinks(url)` | Gateway | Páginas com ligação para o URL |
@@ -542,9 +573,9 @@ receberam depois da última gravação (no máximo `barrel.save.interval.ms`).
 | Só um Barrel ativo | Tudo continua a funcionar com ele | ✅ |
 | Nenhum Barrel ativo | Pesquisas: mensagem `NoBarrelAvailableException`. Downloaders: esperam antes de enviar | ✅ |
 | Downloader livre morre | A fila deteta-o quando lhe tenta enviar um URL; o URL volta ao início da fila | ✅ |
-| Downloader morre a meio de um download | O URL em curso perde-se (limitação 1) | ❌ |
+| Downloader morre a meio de um download | A fila faz `ping` aos Downloaders com URL em curso; se falhar, o URL volta ao início da fila e vai para outro | ✅ |
 | Download falha (temporário / permanente) | Temporário: até `queue.max.retries` novas tentativas. Permanente: não se repete | ✅ |
-| Fila morre e reinicia | Downloaders detetam pelo `ping` e registam-se na nova fila; os URLs que estavam na fila perdem-se (limitação 4) | ✅ (reinício) |
+| Fila morre e reinicia | Carrega do ficheiro os URLs por visitar (os em curso à frente), os vistos e as tentativas; os Downloaders detetam pelo `ping` e registam-se na nova fila | ✅ (`kill -9`) |
 | Fila em baixo quando um utilizador pede um URL | A Gateway guarda-o (também em ficheiro) e reenvia-o quando a fila voltar | ✅ |
 | Fila em baixo no fim de um download | O Downloader guarda os links e reenvia-os quando a fila voltar | ✅ |
 | Gateway morre e reinicia | Estado (pendentes, top 10) lido do ficheiro; Barrels voltam a registar-se; Downloaders voltam a obter a lista; Clients repetem os pedidos e voltam a subscrever as estatísticas | ✅ |
@@ -557,7 +588,7 @@ receberam depois da última gravação (no máximo `barrel.save.interval.ms`).
   a outra máquina simplesmente deixa de responder.
 - Por **heartbeat**:
   - os Barrels renovam a lease na Gateway;
-  - os Downloaders fazem `ping` à fila;
+  - os Downloaders fazem `ping` à fila, e a fila faz `ping` aos Downloaders com URL em curso;
   - os Clients fazem `ping` à Gateway no ecrã de estatísticas.
 
 ---
@@ -566,9 +597,9 @@ receberam depois da última gravação (no máximo `barrel.save.interval.ms`).
 
 | Programa | Threads | Sincronização |
 |---|---|---|
-| URLQueue | Threads do RMI (chamadas remotas) + `dispatcher` | `LinkedBlockingDeque`/`Queue`, `ConcurrentHashMap` (sem locks explícitos) |
+| URLQueue | Threads do RMI (chamadas remotas), `dispatcher`, `downloader-check`, `queue-saver` | Lock da fila (`synchronized` + `wait`/`notifyAll`) para URLs, vistos, tentativas e URLs em curso; `LinkedBlockingQueue` para os Downloaders livres; `saveLock` para a gravação (escrita fora do lock da fila) |
 | Downloader | Uma por download, `queue-heartbeat`, `barrel-list`, uma `multicast-<Barrel>` por Barrel | `lock` para `busy`/`registeredWith`; `ReliableMulticast` com `synchronized` + `wait`/`notifyAll`; uma `BlockingDeque` por canal |
-| Barrel | Threads do RMI, `gateway-heartbeat`, `barrel-saver` | Métodos do índice `synchronized`; a leitura do snapshot recebido é feita fora do lock |
+| Barrel | Threads do RMI, `gateway-heartbeat`, `barrel-saver` | Métodos do índice `synchronized`; a leitura do snapshot recebido e a escrita do ficheiro são feitas fora do lock (`saveLock` só para a gravação) |
 | Gateway | Threads do RMI, `barrel-expiry`, `pending-urls`, `gateway-saver`, `stats-notifier` | `ConcurrentHashMap`, `CopyOnWriteArrayList`, `LinkedBlockingDeque`; `getStats`/`save` `synchronized` |
 | Client | Menu (thread principal), `stats-monitor`, threads do RMI (callback) | `volatile` para a referência da Gateway e o estado do ecrã; subscrições sob lock |
 
@@ -592,9 +623,9 @@ páginas; os callbacks das estatísticas chegam ao Client enquanto o menu espera
 | Modelo de falhas: crash e omissão (t02) | Secção 7 |
 | Reliable multicast: integridade, validade, acordo, FIFO (t08) | Secção 6.1 |
 | Deteção de omissões por números de sequência (t08) | `checkMissing` (secção 6.2) |
-| Threads, `synchronized`, `wait`/`notifyAll` em ciclo (t04) | Barrel, `ReliableMulticast.multicast` |
+| Threads, `synchronized`, `wait`/`notifyAll` em ciclo (t04) | Barrel, `ReliableMulticast.multicast`, dispatcher da URLQueue |
 | `java.util.concurrent`: `BlockingQueue`, `ConcurrentHashMap`, `CopyOnWriteArrayList` (t04) | Fila, Gateway, multicast |
-| Persistência e escrita atómica | Barrel e Gateway (`.tmp` + `ATOMIC_MOVE`) |
+| Persistência e escrita atómica | Barrel, Gateway e URLQueue (`.tmp` + `ATOMIC_MOVE`) |
 
 ---
 
@@ -627,22 +658,17 @@ páginas; os callbacks das estatísticas chegam ao Client enquanto o menu espera
 
 ## 11. Limitações conhecidas
 
-1. **Downloader que morre a meio de um download:** o URL em curso perde-se. A fila só deteta
-   Downloaders mortos quando lhes tenta enviar um URL. *Como corrigir:* a fila guardaria o URL em
-   curso de cada Downloader e verificaria periodicamente se ele está vivo; se não estivesse, o URL
-   voltava à fila.
-2. **A fila de URLs está só em memória:** se a URLQueue morrer, perde os URLs por visitar. O enunciado
-   deixa o desenho da fila livre. Os Downloaders recuperam sozinhos quando a fila volta, e os pedidos
-   dos utilizadores feitos com a fila em baixo ficam guardados na Gateway. *Como corrigir:* gravar a
-   fila e o conjunto `seen` em ficheiro, como o Barrel.
-3. **`Barrel.save` grava enquanto segura o lock:** com um índice muito grande, as pesquisas esperam
-   durante cada gravação. *Como corrigir:* serializar o índice para memória sob o lock (como o
-   `getSnapshot`) e escrever o ficheiro fora dele.
-4. **Os dois Barrels morrem ao mesmo tempo com `kill -9`:** perde-se o que receberam depois da última
+1. **Os dois Barrels morrem ao mesmo tempo com `kill -9`:** perde-se o que receberam depois da última
    gravação (no máximo `barrel.save.interval.ms`), porque o ACK é dado antes de gravar.
-5. **A Gateway e a fila não são replicadas:** enquanto estão em baixo, o serviço correspondente
+2. **A fila morre com `kill -9`:** perde o que mudou depois da última gravação (no máximo
+   `queue.save.interval.ms`). Os links dessas páginas já indexadas não voltam a ser descobertos, a não
+   ser que apareçam noutra página. Com Ctrl+C não se perde nada (shutdown hook).
+3. **A Gateway e a fila não são replicadas:** enquanto estão em baixo, o serviço correspondente
    pára, mas recupera sozinho quando reiniciam. O enunciado só pede redundância nos Barrels.
-6. **O snapshot copia o índice inteiro:** simples e correto (união), mas com um índice enorme seria
+4. **A cópia para memória na gravação do Barrel ainda é feita sob o lock:** é rápida (sem disco), mas
+   com um índice enorme as pesquisas esperam por ela. Seria possível evitá-lo com estruturas
+   persistentes ou gravação incremental.
+5. **O snapshot copia o índice inteiro:** simples e correto (união), mas com um índice enorme seria
    pesado. Seria possível enviar só o que falta, com um log de mensagens por Barrel.
 
 ---
@@ -672,8 +698,15 @@ páginas; os callbacks das estatísticas chegam ao Client enquanto o menu espera
   "assim que possível".
 - **Porque normalizam os URLs?** `https://uc.pt` e `https://uc.pt/` são a mesma página: sem
   normalização era visitada duas vezes e as ligações recebidas ficavam divididas.
-- **O que acontece se a fila reiniciar?** Os Downloaders detetam a falha pelo `ping`, procuram a fila
-  no registry e registam-se na nova.
+- **O que acontece se a fila reiniciar?** Carrega do ficheiro os URLs por visitar, os vistos e as
+  tentativas (os URLs que estavam em curso voltam à frente). Os Downloaders detetam a falha pelo
+  `ping`, procuram a fila no registry e registam-se na nova.
+- **E se um Downloader morrer a meio de um download?** A fila guarda o URL em curso de cada Downloader
+  e faz-lhe `ping` a cada `queue.downloader.check.ms`. Se o ping falhar, o URL volta ao início da fila.
+  O URL só sai de "em curso" quando o Downloader chama `downloaderReady`, isto é, depois de ter enviado
+  a página aos Barrels e os links à fila.
+- **E se o ping falhar por uma falha de rede passageira?** O URL é descarregado duas vezes. Não estraga
+  nada: guardar uma página nos Barrels é idempotente (conjuntos) e a fila ignora os links já vistos.
 - **Porque é que um 404 não é repetido?** É um erro permanente: repetir não adianta. Só os erros
   temporários (timeout, 5xx) voltam à fila.
 
@@ -750,4 +783,6 @@ páginas; os callbacks das estatísticas chegam ao Client enquanto o menu espera
 | 7 | Reiniciar o Barrel2 | Sincroniza-se ("Synchronized with Barrel Barrel1") e fica idêntico |
 | 8 | Matar a Gateway, pesquisar no Client, reiniciar a Gateway | O Client repete o pedido e conclui-o; o top 10 mantém-se |
 | 9 | Apagar `data/Barrel2.ser` com o Barrel2 parado e reiniciá-lo | Barrel "novo" copia o índice do outro (extra) |
-| 10 | Mostrar o `googol.properties` | Configuração sem recompilar |
+| 10 | Fechar o terminal de um Downloader a meio de um download | A fila escreve "Downloader died while downloading, URL returned to queue" e o URL vai para o outro Downloader |
+| 11 | Fechar a URLQueue e reiniciá-la | "URLQueue state loaded from ...": continua com os URLs que tinha |
+| 12 | Mostrar o `googol.properties` | Configuração sem recompilar |

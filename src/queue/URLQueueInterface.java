@@ -27,7 +27,8 @@ public interface URLQueueInterface extends Remote {
     // Volta a pôr na fila um URL cujo download falhou (com limite de tentativas)
     void retryUrl(String url) throws RemoteException;
 
-    // O downloader avisa que está livre para receber um novo URL
+    // O downloader avisa que está livre para receber um novo URL (o URL que tinha em curso terminou,
+    // já com os links enviados ou o retryUrl pedido)
     void downloaderReady(DownloaderInterface downloader) throws RemoteException;
 
     // Usado pelos downloaders para verificar se a fila continua ativa (deteta reinícios da fila)
