@@ -1,0 +1,91 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="arquitetura" name="Arquitetura do Googol">
+    <mxGraphModel dx="1100" dy="620" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="620" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Legenda -->
+        <mxCell id="leg1" value="" style="endArrow=block;endFill=1;html=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="30" y="40" as="sourcePoint" /><mxPoint x="70" y="40" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="leg1t" value="chamada RMI" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="78" y="30" width="100" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="" style="endArrow=block;endFill=1;dashed=1;html=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="30" y="62" as="sourcePoint" /><mxPoint x="70" y="62" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="leg2t" value="callback RMI" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="78" y="52" width="100" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Componentes -->
+        <mxCell id="client" value="&lt;b&gt;Client&lt;/b&gt;&lt;br&gt;menu de consola" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="30" y="260" width="160" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="gateway" value="&lt;b&gt;Gateway&lt;/b&gt;&lt;br&gt;registry :1100&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;data/gateway-state.ser&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="330" y="250" width="180" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="queue" value="&lt;b&gt;URLQueue&lt;/b&gt;&lt;br&gt;registry :1099&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;data/queue-state.ser&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="330" y="30" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="downloaders" value="&lt;b&gt;Downloaders&lt;/b&gt;&lt;br&gt;1..N em paralelo&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;(ReliableMulticast)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="650" y="30" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="www" value="World Wide&lt;br&gt;Web" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="930" y="45" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="barrels" value="Index Storage Barrels (réplicas)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f8f8f8;strokeColor=#999999;verticalAlign=bottom;fontSize=12;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="580" y="410" width="480" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="barrel1" value="&lt;b&gt;Barrel 1&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;data/&amp;lt;nome&amp;gt;.ser&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="600" y="450" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="barrel2" value="&lt;b&gt;Barrel 2&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;data/&amp;lt;nome&amp;gt;.ser&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="870" y="450" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="common" value="&lt;b&gt;common&lt;/b&gt; (classes partilhadas)&lt;br&gt;Config · Tokenizer · UrlNormalizer&lt;br&gt;PageData · SearchResult · Stats&lt;br&gt;IndexMessage (Serializable)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="30" y="450" width="290" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Ligações -->
+        <mxCell id="e1" value="indexUrl · search&lt;br&gt;getBacklinks · ping&lt;br&gt;subscribeStats" style="endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=none;verticalAlign=bottom;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="190" y="285" as="sourcePoint" /><mxPoint x="330" y="285" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="statsUpdated&lt;br&gt;(callback)" style="endArrow=block;endFill=1;dashed=1;html=1;fontSize=11;labelBackgroundColor=none;verticalAlign=top;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="330" y="320" as="sourcePoint" /><mxPoint x="190" y="320" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="addUrlPriority" style="endArrow=block;endFill=1;html=1;fontSize=11;align=left;spacingLeft=8;" edge="1" parent="1" source="gateway" target="queue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="download(url) · ping" style="endArrow=block;endFill=1;dashed=1;html=1;fontSize=11;labelBackgroundColor=none;verticalAlign=bottom;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="510" y="60" as="sourcePoint" /><mxPoint x="650" y="60" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="addUrls · retryUrl&lt;br&gt;downloaderReady · ping" style="endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=none;verticalAlign=top;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="650" y="95" as="sourcePoint" /><mxPoint x="510" y="95" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="HTTP&lt;br&gt;(jsoup)" style="endArrow=block;endFill=1;html=1;fontSize=11;strokeColor=#888888;labelBackgroundColor=none;verticalAlign=bottom;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="850" y="75" as="sourcePoint" /><mxPoint x="930" y="75" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="getBarrels" style="endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="670" y="120" as="sourcePoint" /><mxPoint x="510" y="275" as="targetPoint" /><Array as="points"><mxPoint x="670" y="275" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e8a" value="deliver(IndexMessage)&lt;br&gt;reliable multicast&lt;br&gt;(ACK = retorno; retransmite)" style="endArrow=block;endFill=1;html=1;fontSize=11;strokeWidth=2;labelBackgroundColor=#ffffff;" edge="1" parent="1" target="barrel1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="760" y="120" as="sourcePoint" /><Array as="points"><mxPoint x="760" y="385" /><mxPoint x="685" y="385" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e8b" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;" edge="1" parent="1" target="barrel2">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="760" y="385" as="sourcePoint" /><Array as="points"><mxPoint x="955" y="385" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="registerBarrel&lt;br&gt;(heartbeat)" style="endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="580" y="450" as="sourcePoint" /><mxPoint x="510" y="315" as="targetPoint" /><Array as="points"><mxPoint x="545" y="450" /><mxPoint x="545" y="315" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="search · getBacklinks" style="endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="420" y="350" as="sourcePoint" /><mxPoint x="580" y="520" as="targetPoint" /><Array as="points"><mxPoint x="420" y="520" /></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="getSnapshot&lt;br&gt;getLastSeqs" style="startArrow=block;startFill=1;endArrow=block;endFill=1;html=1;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="barrel1" target="barrel2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

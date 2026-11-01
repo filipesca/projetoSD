@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="590" viewBox="0 0 1080 590" font-family="Helvetica, Arial, sans-serif">
+  <!-- Arquitetura do Googol (exportação do docs/arquitetura.drawio) -->
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#888"/>
+    </marker>
+  </defs>
+  <rect width="1080" height="590" fill="#ffffff"/>
+
+  <!-- Legenda -->
+  <g font-size="12" fill="#333">
+    <line x1="30" y1="40" x2="70" y2="40" stroke="#333" stroke-width="1.3" marker-end="url(#a)"/>
+    <text x="78" y="44">chamada RMI</text>
+    <line x1="30" y1="62" x2="70" y2="62" stroke="#333" stroke-width="1.3" stroke-dasharray="6 4" marker-end="url(#a)"/>
+    <text x="78" y="66">callback RMI</text>
+  </g>
+
+  <!-- Contentor dos Barrels -->
+  <rect x="580" y="410" width="480" height="160" rx="10" fill="#f8f8f8" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="820" y="560" font-size="12" font-style="italic" fill="#555" text-anchor="middle">Index Storage Barrels (réplicas)</text>
+
+  <!-- Componentes -->
+  <g text-anchor="middle" fill="#222">
+    <rect x="30" y="260" width="160" height="80" rx="10" fill="#d5e8d4" stroke="#82b366"/>
+    <text x="110" y="295" font-size="14" font-weight="bold">Client</text>
+    <text x="110" y="315" font-size="12">menu de consola</text>
+
+    <rect x="330" y="250" width="180" height="100" rx="10" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="420" y="285" font-size="14" font-weight="bold">Gateway</text>
+    <text x="420" y="305" font-size="12">registry :1100</text>
+    <text x="420" y="323" font-size="11">data/gateway-state.ser</text>
+
+    <rect x="330" y="30" width="180" height="90" rx="10" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="420" y="62" font-size="14" font-weight="bold">URLQueue</text>
+    <text x="420" y="82" font-size="12">registry :1099</text>
+    <text x="420" y="100" font-size="11">data/queue-state.ser</text>
+
+    <rect x="650" y="30" width="200" height="90" rx="10" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="750" y="62" font-size="14" font-weight="bold">Downloaders</text>
+    <text x="750" y="82" font-size="12">1..N em paralelo</text>
+    <text x="750" y="100" font-size="11">(ReliableMulticast)</text>
+
+    <ellipse cx="990" cy="75" rx="60" ry="30" fill="#f5f5f5" stroke="#666"/>
+    <text x="990" y="72" font-size="12">World Wide</text>
+    <text x="990" y="87" font-size="12">Web</text>
+
+    <rect x="600" y="450" width="170" height="80" rx="10" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="685" y="485" font-size="14" font-weight="bold">Barrel 1</text>
+    <text x="685" y="505" font-size="11">data/&lt;nome&gt;.ser</text>
+
+    <rect x="870" y="450" width="170" height="80" rx="10" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="955" y="485" font-size="14" font-weight="bold">Barrel 2</text>
+    <text x="955" y="505" font-size="11">data/&lt;nome&gt;.ser</text>
+
+    <rect x="30" y="450" width="290" height="110" rx="10" fill="#fff2cc" stroke="#d6b656"/>
+    <text x="175" y="476" font-size="13"><tspan font-weight="bold">common</tspan> (classes partilhadas)</text>
+    <text x="175" y="499" font-size="12">Config · Tokenizer · UrlNormalizer</text>
+    <text x="175" y="519" font-size="12">PageData · SearchResult · Stats</text>
+    <text x="175" y="539" font-size="12">IndexMessage (Serializable)</text>
+  </g>
+
+  <!-- Ligações -->
+  <g fill="none" stroke="#333" stroke-width="1.3">
+    <!-- Client -> Gateway -->
+    <line x1="190" y1="285" x2="330" y2="285" marker-end="url(#a)"/>
+    <!-- Gateway -> Client (callback) -->
+    <line x1="330" y1="320" x2="190" y2="320" stroke-dasharray="6 4" marker-end="url(#a)"/>
+    <!-- Gateway -> URLQueue -->
+    <line x1="420" y1="250" x2="420" y2="120" marker-end="url(#a)"/>
+    <!-- URLQueue -> Downloaders (callback) -->
+    <line x1="510" y1="60" x2="650" y2="60" stroke-dasharray="6 4" marker-end="url(#a)"/>
+    <!-- Downloaders -> URLQueue -->
+    <line x1="650" y1="95" x2="510" y2="95" marker-end="url(#a)"/>
+    <!-- Downloaders -> Web -->
+    <line x1="850" y1="75" x2="930" y2="75" stroke="#888" marker-end="url(#g)"/>
+    <!-- Downloaders -> Gateway (getBarrels) -->
+    <path d="M670,120 V275 H510" marker-end="url(#a)"/>
+    <!-- Downloaders -> Barrels (reliable multicast) -->
+    <path d="M760,120 V385" stroke-width="2"/>
+    <path d="M685,385 H955" stroke-width="2"/>
+    <path d="M685,385 V450" stroke-width="2" marker-end="url(#a)"/>
+    <path d="M955,385 V450" stroke-width="2" marker-end="url(#a)"/>
+    <!-- Barrels -> Gateway (heartbeat) -->
+    <path d="M580,450 H545 V315 H510" marker-end="url(#a)"/>
+    <!-- Gateway -> Barrels (pesquisas) -->
+    <path d="M420,350 V520 H580" marker-end="url(#a)"/>
+    <!-- Barrel <-> Barrel (sincronização) -->
+    <line x1="770" y1="490" x2="870" y2="490" marker-start="url(#a)" marker-end="url(#a)"/>
+  </g>
+
+  <!-- Etiquetas das ligações -->
+  <g font-size="11" fill="#333" text-anchor="middle">
+    <text x="260" y="248">indexUrl · search</text>
+    <text x="260" y="262">getBacklinks · ping</text>
+    <text x="260" y="276">subscribeStats</text>
+    <text x="260" y="337">statsUpdated</text>
+    <text x="260" y="351">(callback)</text>
+    <text x="428" y="190" text-anchor="start">addUrlPriority</text>
+    <text x="580" y="52">download(url) · ping</text>
+    <text x="580" y="111">addUrls · retryUrl</text>
+    <text x="580" y="125">downloaderReady · ping</text>
+    <text x="890" y="55">HTTP</text>
+    <text x="890" y="68">(jsoup)</text>
+    <text x="600" y="268">getBarrels</text>
+    <text x="772" y="222" text-anchor="start">deliver(IndexMessage)</text>
+    <text x="772" y="236" text-anchor="start" font-weight="bold">reliable multicast</text>
+    <text x="772" y="250" text-anchor="start">(ACK = retorno; retransmite)</text>
+    <text x="538" y="385" text-anchor="end">registerBarrel</text>
+    <text x="538" y="399" text-anchor="end">(heartbeat)</text>
+    <text x="500" y="512">search · getBacklinks</text>
+    <text x="820" y="482">getSnapshot</text>
+    <text x="820" y="506">getLastSeqs</text>
+  </g>
+</svg>
